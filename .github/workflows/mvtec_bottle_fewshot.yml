@@ -68,5 +68,5 @@ jobs:
           path: |
             results/dataset_manifest.json
             results/bottle_fewshot_summary.csv
-            results/bottle_*shot/benchmark_results.csv
+            results/bottle_*shot/**/benchmark_results.csv
           if-no-files-found: warn
