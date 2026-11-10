@@ -10,10 +10,17 @@
 대규모 의존성이나 모델을 설치하지 않지만, 별도 MVTec few-shot 실험 workflow는
 CPU용 PyTorch와 공개 DINOv2 모델을 내려받아 실제 inference를 실행합니다.
 
-PyTorch와 torchvision은 CPU/CUDA 환경에 맞춰 **별도로 설치**하세요. 필요한
-PyTorch 버전과 설치 명령은 [공식 설치 페이지](https://pytorch.org/get-started/locally/)에서
-확인할 수 있습니다. GitHub Actions CPU 실험은 torch 2.5.1/torchvision 0.20.1로
-검증했으며, GPU 환경에서는 그대로 복사하지 말고 드라이버 및 CUDA 조합을 확인하세요.
+`requirements.txt`에는 현재 로컬 RTX 4050 Laptop GPU(드라이버 576.80)에 맞춰
+**torch 2.11.0+cu128 / torchvision 0.26.0+cu128**을 고정했습니다.
+`--extra-index-url`을 사용하므로 일반 패키지는 PyPI에서 받고, 해당 CUDA wheel은
+공식 PyTorch 저장소에서 받습니다. `nvidia-smi`에 CUDA 12.9가 표시되더라도
+드라이버가 CUDA 12.8 빌드를 실행할 수 있습니다.
+
+이 요구사항은 NVIDIA GPU용입니다. CPU 전용 환경이나 다른 CUDA 환경에서는
+[PyTorch 공식 설치 페이지](https://pytorch.org/get-started/locally/)를 확인해
+`torch`, `torchvision`, 추가 인덱스 설정을 교체하세요.
+GitHub Actions의 공개 MVTec few-shot 실험은 별도 CPU용 버전(2.5.1/0.20.1)을
+설치하므로 이 로컬 GPU 설정의 영향을 받지 않습니다.
 
 ```bash
 conda create -n subspacead python=3.10 -y
@@ -22,8 +29,8 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-`requirements.txt`는 직접 사용하는 패키지만 설치하며, 공식 코드에서 import하지 않는
-anomalib/FrEIA는 포함하지 않습니다. 일부 패키지는 버전 범위만 제한되어 있으므로
+`requirements.txt`는 CUDA 빌드의 PyTorch/torchvision 및 직접 사용하는 패키지를 설치하며,
+공식 코드에서 import하지 않는 anomalib/FrEIA는 포함하지 않습니다. 일부 패키지는 버전 범위만 제한되어 있으므로
 실험 시 실제 설치 버전을 기록하세요.
 
 ## 2. 공식 예제로 실행
