@@ -6,8 +6,14 @@
 
 ## 1. 로컬 또는 GPU 서버 준비
 
-공식 README의 Python 3.10 환경을 따릅니다. 대규모 dependency 설치 및 DINOv2
-가중치 다운로드는 GitHub Actions에서 수행하지 않습니다.
+공식 README의 Python 3.10 환경을 따릅니다. GitHub Actions의 Static smoke test는
+대규모 의존성이나 모델을 설치하지 않지만, 별도 MVTec few-shot 실험 workflow는
+CPU용 PyTorch와 공개 DINOv2 모델을 내려받아 실제 inference를 실행합니다.
+
+PyTorch와 torchvision은 CPU/CUDA 환경에 맞춰 **별도로 설치**하세요. 필요한
+PyTorch 버전과 설치 명령은 [공식 설치 페이지](https://pytorch.org/get-started/locally/)에서
+확인할 수 있습니다. GitHub Actions CPU 실험은 torch 2.5.1/torchvision 0.20.1로
+검증했으며, GPU 환경에서는 그대로 복사하지 말고 드라이버 및 CUDA 조합을 확인하세요.
 
 ```bash
 conda create -n subspacead python=3.10 -y
@@ -16,8 +22,9 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-`requirements.txt`의 버전이 고정되어 있지 않으므로 첫 실행에서 실제 설치 버전을
-기록하고, GPU 서버의 CUDA/PyTorch 조합이 맞는지 확인하세요.
+`requirements.txt`는 직접 사용하는 패키지만 설치하며, 공식 코드에서 import하지 않는
+anomalib/FrEIA는 포함하지 않습니다. 일부 패키지는 버전 범위만 제한되어 있으므로
+실험 시 실제 설치 버전을 기록하세요.
 
 ## 2. 공식 예제로 실행
 

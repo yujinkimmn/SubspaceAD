@@ -1,11 +1,11 @@
-torch
-torchvision
-transformers
-opencv-python
-kornia
-numpy
-pandas
-scikit-learn
+# Install CPU/CUDA-compatible torch and torchvision separately first.
+numpy<2
+scipy<1.15
+scikit-learn<1.6
+pandas<2.3
 Pillow
-anomalib
+opencv-python-headless
+kornia
 tqdm
+transformers==4.52.2
+huggingface_hub<1.0
