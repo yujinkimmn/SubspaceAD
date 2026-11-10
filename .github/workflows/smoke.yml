@@ -1,0 +1,26 @@
+name: Static smoke test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import-and-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compile Python files without model or dataset downloads
+        run: python -m compileall -q main.py src tools
+      - name: Install local package metadata without large ML dependencies
+        run: python -m pip install --no-deps -e .
+      - name: Verify package import
+        run: python -c 'import subspacead; print("subspacead import OK")'
