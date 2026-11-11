@@ -70,12 +70,16 @@ class PCAModel:
         """Pass 1: Compute the mean of all features."""
         logging.info("Starting PCA Pass 1/2 (Mean)...")
         self.mu_ = torch.zeros(feature_dim, dtype=self.dtype, device=self.device)
+        observed_tokens = 0
         for batch in tqdm(
             feature_generator(), total=num_batches, desc="PCA Pass 1/2 (Mean)"
         ):
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
             self.mu_ += torch.sum(batch_gpu, axis=0)
-        self.mu_ /= total_tokens
+            observed_tokens += batch_gpu.shape[0]
+        if observed_tokens < 2:
+            raise ValueError("PCA needs at least two valid patch tokens")
+        self.mu_ /= observed_tokens
 
     def _compute_covariance(
         self, feature_generator, feature_dim, total_tokens, num_batches
@@ -85,13 +89,17 @@ class PCAModel:
         cov_matrix = torch.zeros(
             (feature_dim, feature_dim), dtype=self.dtype, device=self.device
         )
+        observed_tokens = 0
         for batch in tqdm(
             feature_generator(), total=num_batches, desc="PCA Pass 2/2 (Cov)"
         ):
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
             batch_centered = batch_gpu - self.mu_
             cov_matrix += torch.matmul(batch_centered.T, batch_centered)
-        cov_matrix /= total_tokens - 1
+            observed_tokens += batch_gpu.shape[0]
+        if observed_tokens < 2:
+            raise ValueError("PCA needs at least two valid patch tokens")
+        cov_matrix /= observed_tokens - 1
         return cov_matrix
 
     def _compute_eigendecomposition(self, cov_matrix):

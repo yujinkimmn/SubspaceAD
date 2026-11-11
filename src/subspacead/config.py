@@ -57,6 +57,12 @@ def get_args():
         "--image_res", type=int, default=256, help="Image resolution for the model."
     )
     model_group.add_argument(
+        "--resize_mode",
+        choices=["stretch", "letterbox"],
+        default="stretch",
+        help="Stretch to a square (default), or preserve aspect ratio with centered padding.",
+    )
+    model_group.add_argument(
         "--patch_size",
         type=int,
         default=None,

@@ -42,13 +42,20 @@ def save_overlay_for_intro(
     category: str,
     kernel_size: int = 5,
     overlay_intensity: float = 0.4,
+    display_scale: int = 1,
 ):
     """
     Saves a denoised, blended overlay for introductory figures.
     Assumes anom_map is a 0-1 normalized float array.
     """
     img_h, img_w = anom_map.shape
-    img_np = np.array(img.resize((img_w, img_h)))
+    img_w *= display_scale
+    img_h *= display_scale
+    img_np = np.array(img.resize((img_w, img_h), Image.Resampling.NEAREST))
+    if display_scale != 1:
+        anom_map = cv2.resize(
+            anom_map, (img_w, img_h), interpolation=cv2.INTER_LINEAR
+        )
     img_np = _ensure_rgb(img_np)
 
     anom_map_u8 = (anom_map * 255).astype(np.uint8)
@@ -88,14 +95,24 @@ def save_visualization(
     category: str,
     vis_idx: int,
     saliency_mask: Optional[np.ndarray] = None,
+    display_scale: int = 1,
 ):
     """Saves a 2x2 multi-panel visualization (Original, GT, Map, Saliency/Overlay)."""
-    target_shape = (anom_map.shape[1], anom_map.shape[0])  # (W, H)
-    target_shape_hw = (anom_map.shape[0], anom_map.shape[1])  # (H, W)
+    if display_scale < 1:
+        raise ValueError("display_scale must be >= 1")
+    target_shape = (
+        anom_map.shape[1] * display_scale,
+        anom_map.shape[0] * display_scale,
+    )  # (W, H)
+    target_shape_hw = (target_shape[1], target_shape[0])  # (H, W)
 
-    img_np = np.array(img.resize(target_shape))
+    img_np = np.array(img.resize(target_shape, Image.Resampling.NEAREST))
     img_np_rgb = _ensure_rgb(img_np)
 
+    if display_scale != 1:
+        anom_map = cv2.resize(
+            anom_map, target_shape, interpolation=cv2.INTER_LINEAR
+        )
     heatmap = _create_heatmap(anom_map)
 
     if gt_mask.shape != target_shape_hw:
@@ -113,6 +130,10 @@ def save_visualization(
     panel3 = _add_text_to_image(heatmap, "Anomaly Map")
 
     if saliency_mask is not None:
+        if saliency_mask.shape != target_shape_hw:
+            saliency_mask = cv2.resize(
+                saliency_mask, target_shape, interpolation=cv2.INTER_NEAREST
+            )
         saliency_mask_u8 = (saliency_mask * 255).astype(np.uint8)
         saliency_mask_vis = _ensure_rgb(saliency_mask_u8)
         panel4 = _add_text_to_image(saliency_mask_vis, "Saliency Mask (FG)")

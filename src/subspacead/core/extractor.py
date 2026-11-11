@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from src.subspacead.data.letterbox import letterbox_image
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -144,6 +146,7 @@ class FeatureExtractor:
         docrop: bool = False,
         use_clahe: bool = False,
         dino_saliency_layer: int = 0,
+        resize_mode: str = "stretch",
     ):
         """
         Extracts, aggregates features, and computes saliency from a batch of images.
@@ -158,22 +161,36 @@ class FeatureExtractor:
         if use_clahe:
             pil_imgs = self._apply_clahe(pil_imgs)
 
-        if docrop:
-            resize_res = int(res / 0.875)
-            size = {"height": resize_res, "width": resize_res}
-            crop_size = {"height": res, "width": res}
-        else:
-            size = {"height": res, "width": res}
-            crop_size = {"height": res, "width": res}
+        if resize_mode == "letterbox":
+            if docrop:
+                raise ValueError("--docrop cannot be combined with letterbox resizing")
+            images = [letterbox_image(img, res) for img in pil_imgs]
+            # Keep the padded geometry intact; only normalize the pixel values.
+            inputs = self.processor(
+                images=images,
+                return_tensors="pt",
+                do_resize=False,
+                do_center_crop=False,
+            ).to(DEVICE)
+        elif resize_mode == "stretch":
+            if docrop:
+                resize_res = int(res / 0.875)
+                size = {"height": resize_res, "width": resize_res}
+                crop_size = {"height": res, "width": res}
+            else:
+                size = {"height": res, "width": res}
+                crop_size = {"height": res, "width": res}
 
-        inputs = self.processor(
-            images=pil_imgs,
-            return_tensors="pt",
-            do_resize=True,
-            size=size,
-            do_center_crop=docrop,
-            crop_size=crop_size,
-        ).to(DEVICE)
+            inputs = self.processor(
+                images=pil_imgs,
+                return_tensors="pt",
+                do_resize=True,
+                size=size,
+                do_center_crop=docrop,
+                crop_size=crop_size,
+            ).to(DEVICE)
+        else:
+            raise ValueError(f"Unsupported resize_mode: {resize_mode}")
 
         # 2. Model Inference
         outputs = self.model(
