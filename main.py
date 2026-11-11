@@ -41,6 +41,7 @@ from src.subspacead.post_process.specular import (
 )
 from src.subspacead.core.patching import process_image_patched, get_patch_coords
 from src.subspacead.data.transforms import get_augmentation_transform
+from src.subspacead.data.letterbox import unletterbox_map, valid_patch_mask
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -191,6 +192,14 @@ def compute_aupro(
 
 def main():
     args = get_args()
+    if args.resize_mode == "letterbox":
+        if args.docrop:
+            raise ValueError("--resize_mode letterbox cannot be combined with --docrop")
+        if args.patch_size:
+            raise ValueError("--resize_mode letterbox currently supports only full-image mode (no --patch_size)")
+        if args.image_res % 14:
+            raise ValueError("DINOv2 letterbox mode requires --image_res divisible by patch size 14")
+
     run_name = f"{args.dataset_name}_{args.agg_method}_layers{''.join(args.layers.split(','))}_res{args.image_res}_docrop{int(args.docrop)}"
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -206,6 +215,8 @@ def main():
         return
     if args.patch_size:
         run_name += f"_patch{args.patch_size}"
+    if args.resize_mode == "letterbox":
+        run_name += "_letterbox"
     if args.use_kernel_pca:
         run_name += f"_kpca-{args.kernel_pca_kernel}"
     if args.use_specular_filter:
@@ -351,6 +362,7 @@ def main():
                 args.docrop,
                 use_clahe=args.use_clahe,
                 dino_saliency_layer=args.dino_saliency_layer,
+                resize_mode=args.resize_mode,
             )
             feature_dim = temp_tokens.shape[-1]
             tokens_per_patch = h_p * w_p
@@ -412,6 +424,7 @@ def main():
                                 args.docrop,
                                 use_clahe=args.use_clahe,
                                 dino_saliency_layer=args.dino_saliency_layer,
+                                resize_mode=args.resize_mode,
                             )
                             tokens_flat = tokens_batch.reshape(-1, feature_dim)
 
@@ -473,11 +486,21 @@ def main():
                 args.docrop,
                 use_clahe=args.use_clahe,
                 dino_saliency_layer=args.dino_saliency_layer,
+                resize_mode=args.resize_mode,
             )
             feature_dim = temp_tokens.shape[-1]
             num_aug_multiplier = (1 + args.aug_count) if aug_transform else 1
             total_train_images = len(train_paths) * num_aug_multiplier
-            total_tokens = total_train_images * h_p * w_p
+            if args.resize_mode == "letterbox":
+                patch_size = extractor.model.config.patch_size
+                total_tokens = sum(
+                    int(valid_patch_mask(
+                        Image.open(path).size, args.image_res, patch_size
+                    ).sum())
+                    for path in train_paths
+                ) * num_aug_multiplier
+            else:
+                total_tokens = total_train_images * h_p * w_p
 
             logging.info(
                 f"Feature dim: {feature_dim}, Tokens per image: {h_p * w_p}, "
@@ -510,12 +533,23 @@ def main():
                         args.docrop,
                         use_clahe=args.use_clahe,
                         dino_saliency_layer=args.dino_saliency_layer,
+                        resize_mode=args.resize_mode,
                     )
                     tokens_flat = tokens_batch.reshape(-1, feature_dim)
+                    masks_flat = saliency_masks_batch.reshape(-1)
+                    if args.resize_mode == "letterbox":
+                        # Exclude padding-only DINO patch tokens from PCA fitting.
+                        valid_tokens = np.concatenate([
+                            valid_patch_mask(
+                                img.size, args.image_res, extractor.model.config.patch_size
+                            ).reshape(-1)
+                            for img in img_batch
+                        ])
+                        tokens_flat = tokens_flat[valid_tokens]
+                        masks_flat = masks_flat[valid_tokens]
 
                     # Train masking logic
                     if args.bg_mask_method == "dino_saliency":
-                        masks_flat = saliency_masks_batch.reshape(-1)
                         try:
                             if args.mask_threshold_method == "percentile":
                                 threshold = np.percentile(
@@ -667,6 +701,7 @@ def main():
                         args.docrop,
                         use_clahe=args.use_clahe,
                         dino_saliency_layer=args.dino_saliency_layer,
+                        resize_mode=args.resize_mode,
                     )
                     b, _, _, c = tokens.shape
                     tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -770,6 +805,10 @@ def main():
                         anomaly_map_final = post_process_map(
                             anomaly_maps[j], args.image_res
                         )
+                        if args.resize_mode == "letterbox":
+                            anomaly_map_final = unletterbox_map(
+                                anomaly_map_final, pil_imgs[j].size, args.image_res
+                            )
 
                         if args.use_specular_filter:
                             img_tensor = (
@@ -898,6 +937,7 @@ def main():
                         args.docrop,
                         use_clahe=args.use_clahe,
                         dino_saliency_layer=args.dino_saliency_layer,
+                        resize_mode=args.resize_mode,
                     )
                     # A minimal version of the scoring
                     _scores = calculate_anomaly_scores(
@@ -995,6 +1035,7 @@ def main():
                     args.docrop,
                     use_clahe=args.use_clahe,
                     dino_saliency_layer=args.dino_saliency_layer,
+                    resize_mode=args.resize_mode,
                 )
                 b, _, _, c = tokens.shape
                 tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -1096,6 +1137,10 @@ def main():
                     anomaly_map_pre_specular = post_process_map(
                         anomaly_maps[j], args.image_res
                     )
+                    if args.resize_mode == "letterbox":
+                        anomaly_map_pre_specular = unletterbox_map(
+                            anomaly_map_pre_specular, pil_img.size, args.image_res
+                        )
                     anomaly_map_final = anomaly_map_pre_specular
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
@@ -1184,6 +1229,7 @@ def main():
                             anomaly_map_normalized,
                             args.outdir,
                             category,
+                            display_scale=4 if args.resize_mode == "letterbox" else 1,
                         )
                     if vis_saved_count < args.vis_count:
                         vis_img = pil_img
@@ -1236,9 +1282,14 @@ def main():
                                         )
                                 saliency_map_for_viz = post_process_map(
                                     binary_mask,
-                                    anomaly_map_normalized.shape,
+                                    args.image_res if args.resize_mode == "letterbox"
+                                    else anomaly_map_normalized.shape,
                                     blur=False,
                                 )
+                                if args.resize_mode == "letterbox":
+                                    saliency_map_for_viz = unletterbox_map(
+                                        saliency_map_for_viz, pil_img.size, args.image_res
+                                    )
                             except Exception as e:
                                 logging.warning(
                                     f"Saliency mask processing failed for visualization: {e}."
@@ -1253,6 +1304,7 @@ def main():
                             category,
                             vis_saved_count,
                             saliency_mask=saliency_map_for_viz,
+                            display_scale=4 if args.resize_mode == "letterbox" else 1,
                         )
                         vis_saved_count += 1
 

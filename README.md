@@ -160,6 +160,43 @@ python main.py \
     --outdir results/debug_run
 ```
 
+
+### Aspect-ratio preserving letterbox (small rectangular images)
+
+For a 61 x 81 image (width x height), use `--resize_mode letterbox` instead
+of the default square stretching:
+
+```bash
+python main.py \
+    --dataset_name mvtec_ad \
+    --dataset_path datasets/mvtec-ad \
+    --categories your_category \
+    --image_res 224 \
+    --resize_mode letterbox \
+    --k_shot 4 \
+    --seed 42 \
+    --outdir results/letterbox
+```
+
+- A 61 x 81 image is resized uniformly to 169 x 224 and centered on a
+  224 x 224 black canvas (27 pixels of left padding, 28 on the right).
+- Training excludes patch tokens whose centers lie in padding; inference
+  removes padding from the anomaly map and resizes scores to the **original**
+  image shape before image scoring, pixel metrics, and visualization.
+- Saved 2x2 visualizations and intro overlays are displayed at 4x the original
+  image dimensions so narrow, low-resolution images remain inspectable.
+- The default `--resize_mode stretch` maintains previous behavior. Output
+  directory names include `_letterbox` to keep experiments separate.
+- Letterbox currently supports **full-image mode only**, without
+  `--patch_size` or `--docrop`; the DINOv2 input size must be divisible
+  by 14. Padding is excluded from PCA token fitting, but padded pixels can
+  still influence nearby DINO attention features.
+- To compare AUROC fairly, rerun PCA fitting and evaluation with the same
+  train/test split and seed for each preprocessing mode. Do not compare
+  scores from different preprocessing modes at a shared threshold.
+
+Geometry tests (do not download DINO weights): `python -m pytest -q tests/test_letterbox.py`.
+
 ## Benchmark Results
 
 ### Few-Shot (Image AUROC)
