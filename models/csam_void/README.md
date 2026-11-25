@@ -1,6 +1,6 @@
 # CSAM Void Segmentation Lab
 
-원본 61×81 grayscale 이미지에서 Void만 분할하는 로컬 실험 러너. 기존 SubspaceAD/NAGL과 독립적이다. 사내 이미지·마스크·결과는 GitHub에 업로드하지 않는다. 저장소가 공개 상태이므로 dataset과 결과 경로는 저장소 밖에 둔다.
+원본 61×81 또는 81×61 (H×W) grayscale 이미지에서 Void만 분할하는 로컬 실험 러너. 기존 SubspaceAD/NAGL과 독립적이다. 사내 이미지·마스크·결과는 GitHub에 업로드하지 않는다. 저장소가 공개 상태이므로 dataset과 결과 경로는 저장소 밖에 둔다.
 
 ## 1. 최초 환경 설정 (Python 3.11 권장)
 
@@ -31,7 +31,7 @@ python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csa
 
 ## 2. Dataset
 
-기존 NAGL CSV 형식 재사용. 모든 경로는 CSV 기준 상대경로 또는 절대경로. 61행×81열의 8-bit 또는 16-bit grayscale PNG/TIFF를 사용한다. RGB/DAT는 사전에 변환한다. mask는 같은 크기에서 0=background, 양수=Void. label=0은 확인된 정상(FPN 포함), 1은 실제 Void가 있는 완전한 pixel mask 필수, -1은 미라벨 이미지(train만). 정상 mask는 빈 칸 가능. 미확인 정상은 -1로 넣는다. ref는 train으로 간주한다. 실제 Void 중 일부만 마킹된 이미지는 완전한 mask로 사용하지 않는다.
+기존 NAGL CSV 형식 재사용. 모든 경로는 CSV 기준 상대경로 또는 절대경로. 61행×81열 또는 81행×61열의 8-bit 또는 16-bit grayscale PNG/TIFF를 사용한다. 첫 이미지에서 원본 (H,W)를 자동 인식하고 모든 이미지와 mask가 동일한 shape인지 검사한다. transpose/회전하지 않는다. CNN은 원본 shape를 유지하고 PaDiM은 양 방향 letterbox 및 원본 좌표 복원을 지원한다. RGB/DAT는 사전에 변환한다. mask는 같은 크기에서 0=background, 양수=Void. label=0은 확인된 정상(FPN 포함), 1은 실제 Void가 있는 완전한 pixel mask 필수, -1은 미라벨 이미지(train만). 정상 mask는 빈 칸 가능. 미확인 정상은 -1로 넣는다. ref는 train으로 간주한다. 실제 Void 중 일부만 마킹된 이미지는 완전한 mask로 사용하지 않는다.
 
     image,mask,label,split,equipment,lot
     images/a.png,,0,train,E1,Y0001
