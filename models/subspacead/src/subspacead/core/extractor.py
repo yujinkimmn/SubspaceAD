@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from src.subspacead.data.letterbox import letterbox_image
+from ..data.letterbox import letterbox_image
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

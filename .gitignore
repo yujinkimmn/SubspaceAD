@@ -228,3 +228,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SubspaceAD working directories
+/models/subspacead/datasets/
+/models/subspacead/results/
+/models/subspacead/logs/
+/models/subspacead/checkpoints/
