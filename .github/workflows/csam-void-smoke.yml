@@ -37,6 +37,10 @@ jobs:
         run: |
           python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_semi --epochs 4 --min-steps 4 --protocol pooled --device cpu --experiments exp7_semi || test "$?" -eq 2
           python models/csam_void/check_smoke.py /tmp/csam_semi --semi
+      - name: Semi-supervised forced update smoke test (toy data only)
+        run: |
+          python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_semi_update --epochs 2 --min-steps 2 --protocol pooled --device cpu --experiments exp7_semi --pseudo-positive 0.1 --pseudo-negative 0.01
+          python models/csam_void/check_smoke.py /tmp/csam_semi_update --semi --require-semi-update
       - name: Upload synthetic reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -45,4 +49,5 @@ jobs:
           path: |
             /tmp/csam_results/
             /tmp/csam_semi/
+            /tmp/csam_semi_update/
           retention-days: 3
