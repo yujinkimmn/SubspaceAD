@@ -301,7 +301,7 @@ def train_cnn(exp, parts, args, device, out):
                     pseudo = teacher(weak).sigmoid()
                 student = model(strong)
                 # Only trust confident pseudo positives and negatives, balance each class.
-                pp,pn = pseudo>=.98,pseudo<=.02
+                pp,pn = pseudo>=args.pseudo_positive,pseudo<=args.pseudo_negative
                 terms = []
                 if pp.any():
                     pseudo_pos_total += int(pp.sum())
@@ -323,7 +323,8 @@ def train_cnn(exp, parts, args, device, out):
         met = metrics(parts["val"],vm,th)
         key = rank_key(met,args)
         history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th))
-        if best is None or key < best:
+        # Exp7 checkpoint must actually include a pseudo-label update.
+        if (idx != 7 or pseudo_pos_total > 0) and (best is None or key < best):
             best,best_state = key,copy.deepcopy(model.state_dict())
     if idx == 7 and pseudo_pos_total == 0:
         raise SkipExperiment("No confident positive pseudo-labels accepted; semi-supervision not exercised")
@@ -508,6 +509,8 @@ def main():
     p.add_argument("--min-steps",type=int,default=20)
     p.add_argument("--lr",type=float,default=1e-3)
     p.add_argument("--seed",type=int,default=42)
+    p.add_argument("--pseudo-positive",type=float,default=.98)
+    p.add_argument("--pseudo-negative",type=float,default=.02)
     p.add_argument("--recall",type=float,default=.95)
     p.add_argument("--region-recall",type=float,default=.90)
     p.add_argument("--device",default="auto")
@@ -520,6 +523,8 @@ def main():
     args=p.parse_args()
     if not (0<args.recall<=1 and 0<=args.region_recall<=1 and args.epochs>0 and args.batch>1 and args.min_steps>0 and 1<=args.padim_dim<=448 and args.padim_size>=32 and args.lr>0 and args.padim_smooth>=0):
         p.error("Invalid hyperparameters")
+    if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
+        p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
     rows=load_manifest(args.manifest)
     device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
     root=Path(args.out)
