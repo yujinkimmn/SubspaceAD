@@ -4,6 +4,8 @@ import csv
 import hashlib
 import html
 import json
+import logging
+import sys
 import math
 import random
 import time
@@ -22,6 +24,61 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 H, W = 61, 81
 EXPS = ["exp0_padim", "exp1_cnn", "exp2_normals", "exp3_hard_negative",
         "exp4_copy_paste", "exp5_domain_aug", "exp6_mixstyle", "exp7_semi"]
+
+LOG = logging.getLogger("csam_void")
+
+def setup_logging(root):
+    LOG.setLevel(logging.INFO)
+    LOG.propagate = False
+    for handler in list(LOG.handlers):
+        LOG.removeHandler(handler)
+        handler.close()
+    fmt = logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+    for handler in (logging.StreamHandler(sys.stdout),
+                    logging.FileHandler(root / "run.log", encoding="utf-8")):
+        handler.setFormatter(fmt)
+        LOG.addHandler(handler)
+
+def elapsed(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}"
+
+def pct(x):
+    return "N/A" if x is None else f"{100*x:.2f}%"
+
+def number(x):
+    return "N/A" if x is None else f"{x:.5f}"
+
+def gpu_memory(device):
+    if device.type != "cuda":
+        return "device=CPU"
+    try:
+        mib = 1024**2
+        return (f"CUDA allocated={torch.cuda.memory_allocated(device)/mib:.0f} MiB "
+                f"reserved={torch.cuda.memory_reserved(device)/mib:.0f} MiB "
+                f"peak_allocated={torch.cuda.max_memory_allocated(device)/mib:.0f} MiB "
+                f"total={torch.cuda.get_device_properties(device).total_memory/mib:.0f} MiB")
+    except Exception:
+        return "CUDA memory unavailable"
+
+def log_dataset(parts):
+    for split, rows in parts.items():
+        groups = [("ALL", rows)] + [(eq, [r for r in rows if r["equipment"] == eq])
+                                    for eq in sorted({r["equipment"] for r in rows})]
+        for eq, rr in groups:
+            n = sum(r["label"] == 0 for r in rr)
+            v = sum(r["label"] == 1 for r in rr)
+            u = sum(r["label"] == -1 for r in rr)
+            LOG.info("[Data] %s equipment=%s total=%d normal=%d void=%d unlabeled=%d lots=%d",
+                     split, eq, len(rr), n, v, u, len({r["lot"] for r in rr}))
+
+def metric_line(m, th):
+    return (f"recall={pct(m['recall'])} FPR={pct(m['fpr'])} "
+            f"worst_FPR={pct(m['worst_equipment_fpr'])} Dice={number(m['dice'])} "
+            f"IoU={number(m['iou'])} 1px={pct(m['regions']['1px']['recall'])} "
+            f"2-4px={pct(m['regions']['2-4px']['recall'])} "
+            f"5+px={pct(m['regions']['5+px']['recall'])} "
+            f"FP={m['fp']} FN={m['fn']} threshold={th:.6g}")
 
 def seed_all(seed):
     random.seed(seed)
@@ -136,16 +193,20 @@ class Samples(Dataset):
     def __init__(self, rows, donors=(), paste=False, aug=False):
         self.rows, self.donors = rows, list(donors)
         self.paste, self.aug = paste, aug
+        self.paste_attempts = self.paste_successes = self.aug_count = 0
     def __len__(self):
         return len(self.rows)
     def __getitem__(self, i):
         r = self.rows[i]
         x, y = r["x"].copy(), r["y"].copy()
         if self.paste and r["label"] == 0 and self.donors and random.random() < .5:
+            self.paste_attempts += 1
             pair = copy_void(x, random.choice(self.donors))
             if pair is not None:
+                self.paste_successes += 1
                 x, y = pair
         if self.aug:
+            self.aug_count += 1
             x = domain_aug(x)
         return torch.from_numpy(x[None]), torch.from_numpy(y[None])
 
@@ -153,9 +214,11 @@ class MixStyle(nn.Module):
     def __init__(self, p=.5, alpha=.1):
         super().__init__()
         self.p, self.alpha = p, alpha
+        self.applied = 0
     def forward(self, x):
         if not self.training or len(x) < 2 or random.random() >= self.p:
             return x
+        self.applied += 1
         mu = x.mean((2, 3), keepdim=True).detach()
         sig = (x.var((2, 3), unbiased=False, keepdim=True) + 1e-6).sqrt().detach()
         perm = torch.randperm(len(x), device=x.device)
@@ -290,10 +353,19 @@ def train_cnn(exp, parts, args, device, out):
     teacher = copy.deepcopy(model).eval() if idx==7 else None
     best, best_state, history = None, None, []
     pseudo_pos_total = 0
+    best_epoch = None
+    train_start = time.perf_counter()
+    LOG.info("[Train] normal=%d void=%d unlabeled=%d sampled_per_epoch=%d batches=%d epochs=%d",
+             counts[0], counts[1], len(unlabeled), len(sampler), len(loader), args.epochs)
     for epoch in range(args.epochs):
+        epoch_start = time.perf_counter()
+        ds.paste_attempts = ds.paste_successes = ds.aug_count = 0
+        mix_before = getattr(model.mix, "applied", 0)
+        pseudo_before = pseudo_pos_total
         model.train()
         running = []
-        for x,y in loader:
+        LOG.info("[Epoch %02d/%02d] start", epoch+1, args.epochs)
+        for step,(x,y) in enumerate(loader,1):
             x,y = x.to(device), y.to(device)
             loss = loss_fn(model(x),y,hard=idx>=3)
             if teacher is not None and epoch >= max(1,args.epochs//5):
@@ -321,19 +393,45 @@ def train_cnn(exp, parts, args, device, out):
                     for t,p in zip(teacher.parameters(),model.parameters()):
                         t.mul_(.99).add_(p,alpha=.01)
             running.append(float(loss.detach()))
+            if args.log_every and (step % args.log_every == 0 or step == len(loader)):
+                dt = time.perf_counter() - epoch_start
+                LOG.info("[Batch %d/%d] epoch=%d loss_mean=%.5f elapsed=%s train_epoch_ETA=%s | %s",
+                         step, len(loader), epoch+1, float(np.mean(running)), elapsed(dt),
+                         elapsed(dt*(len(loader)-step)/step), gpu_memory(device))
+        LOG.info("[Validation] epoch=%d images=%d", epoch+1, len(parts["val"]))
         vm = cnn_maps(model,parts["val"],args,device)
         th = threshold_for(parts["val"],vm,args.recall,args.region_recall)
         met = metrics(parts["val"],vm,th)
         key = rank_key(met,args)
-        history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th))
         # Exp7 checkpoint must actually include a pseudo-label update.
-        if (idx != 7 or pseudo_pos_total > 0) and (best is None or key < best):
+        updated = (idx != 7 or pseudo_pos_total > 0) and (best is None or key < best)
+        if updated:
             best,best_state = key,copy.deepcopy(model.state_dict())
+            best_epoch = epoch+1
+        dt = time.perf_counter() - epoch_start
+        total = time.perf_counter() - train_start
+        eta = total/(epoch+1)*(args.epochs-epoch-1)
+        counters = dict(paste_attempts=ds.paste_attempts, paste_successes=ds.paste_successes,
+                        domain_aug_samples=ds.aug_count,
+                        mixstyle_calls=getattr(model.mix, "applied", 0)-mix_before,
+                        pseudo_positive_pixels=pseudo_pos_total-pseudo_before)
+        history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th,
+                            seconds=dt, best_updated=updated, **counters))
+        (out/"history.json").write_text(json.dumps({"epochs":history,
+              "pseudo_positive_pixels":pseudo_pos_total,"best_epoch":best_epoch},indent=2),encoding="utf-8")
+        LOG.info("[Epoch %02d/%02d] loss=%.5f | %s | %s | elapsed=%s experiment_train_ETA=%s",
+                 epoch+1,args.epochs,float(np.mean(running)),metric_line(met,th),
+                 "BEST UPDATED" if updated else f"best_epoch={best_epoch}",elapsed(dt),elapsed(eta))
+        if idx>=4:
+            LOG.info("[Aug] copy_paste=%d/%d domain_aug=%d mixstyle_calls=%d pseudo_positive_pixels=%d",
+                     counters["paste_successes"],counters["paste_attempts"],
+                     counters["domain_aug_samples"],counters["mixstyle_calls"],counters["pseudo_positive_pixels"])
+        LOG.info("[Memory] %s",gpu_memory(device))
     if idx == 7 and pseudo_pos_total == 0:
         raise SkipExperiment("No confident positive pseudo-labels accepted; semi-supervision not exercised")
     model.load_state_dict(best_state)
     torch.save({"state_dict":model.state_dict(),"mix":idx>=6},out/"model.pt")
-    (out/"history.json").write_text(json.dumps({"epochs":history,"pseudo_positive_pixels":pseudo_pos_total},indent=2),encoding="utf-8")
+    LOG.info("[Checkpoint] selected_epoch=%d saved model.pt", best_epoch)
     return lambda rows: cnn_maps(model,rows,args,device)
 
 def rank_key(m,args):
@@ -382,6 +480,9 @@ class Padim:
             s=a if s is None else s+a
             q=b if q is None else q+b
             n+=len(f)
+            if self.args.log_every and (n == len(rows) or math.ceil(n/self.args.batch)%self.args.log_every == 0):
+                LOG.info("[PaDiM fit] normals=%d/%d | %s", n,len(rows),gpu_memory(self.device))
+        LOG.info("[PaDiM fit] calculating covariance / Cholesky")
         if n<2: raise ValueError("PaDiM requires >=2 normal training images")
         mu=s/n
         cov=(q-n*mu[:,:,None]*mu[:,None,:])/(n-1)
@@ -468,13 +569,18 @@ def run_protocol(parts,args,device,out):
     (out/"config.json").write_text(json.dumps(vars(args),indent=2),encoding="utf-8")
     (out/"split_audit.json").write_text(json.dumps({s:[{k:r[k] for k in ("id","image","label","equipment","lot")} for r in rr] for s,rr in parts.items()},indent=2),encoding="utf-8")
     results=[]
-    for exp in args.experiments:
+    log_dataset(parts)
+    protocol_start=time.perf_counter()
+    for exp_num,exp in enumerate(args.experiments,1):
         start=time.perf_counter()
         seed_all(args.seed)
         dest=out/exp
         dest.mkdir()
+        LOG.info("[Experiment %d/%d] %s / %s START", exp_num,len(args.experiments),out.name,exp)
+        if device.type=="cuda": torch.cuda.reset_peak_memory_stats(device)
         try:
             if exp==EXPS[0]:
+                LOG.info("[PaDiM] feature size=%d channels=%d normal-only fit",args.padim_size,args.padim_dim)
                 model=Padim(args,device)
                 model.fit([r for r in parts["train"] if r["label"]==0])
                 torch.save(dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
@@ -482,13 +588,16 @@ def run_protocol(parts,args,device,out):
                 predict=model.maps
             else:
                 predict=train_cnn(exp,parts,args,device,dest)
+            LOG.info("[Final validation] images=%d",len(parts["val"]))
             vm=predict(parts["val"])
             th=threshold_for(parts["val"],vm,args.recall,args.region_recall)
+            LOG.info("[Test] images=%d threshold=%.6g (fixed from validation)",len(parts["test"]),th)
             tm=predict(parts["test"])
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
             val,test=metrics(parts["val"],vm,th),metrics(parts["test"],tm,th)
             (dest/"threshold.json").write_text(json.dumps({"threshold":th,"source":"validation"}),encoding="utf-8")
+            LOG.info("[Save] val/test maps, masks, overlays and CSV")
             save_eval(parts["val"],vm,th,dest,"val")
             save_eval(parts["test"],tm,th,dest,"test")
             result=dict(experiment=exp,status="ok",threshold=th,val=val,test=test)
@@ -501,7 +610,15 @@ def run_protocol(parts,args,device,out):
         result["seconds"]=time.perf_counter()-start
         results.append(result)
         report(results,out,args)
-        print(exp,result["status"],flush=True)
+        if result["status"]=="ok":
+            LOG.info("[Final Val] %s",metric_line(result["val"],result["threshold"]))
+            LOG.info("[Final Test] %s",metric_line(result["test"],result["threshold"]))
+        else:
+            LOG.warning("[%s] %s: %s",result["status"].upper(),exp,result["error"])
+        dt=time.perf_counter()-protocol_start
+        LOG.info("[Experiment %d/%d] %s %s elapsed=%s protocol_ETA_rough=%s",
+                 exp_num,len(args.experiments),exp,result["status"],elapsed(result["seconds"]),
+                 elapsed(dt/exp_num*(len(args.experiments)-exp_num)))
         if device.type=="cuda": torch.cuda.empty_cache()
     return results
 
@@ -510,6 +627,7 @@ def main():
     p.add_argument("--manifest",required=True)
     p.add_argument("--out",required=True)
     p.add_argument("--epochs",type=int,default=30)
+    p.add_argument("--log-every",type=int,default=50,help="Batch progress interval; 0 disables batch logs (epoch logs remain)")
     p.add_argument("--batch",type=int,default=8)
     p.add_argument("--min-steps",type=int,default=20)
     p.add_argument("--lr",type=float,default=1e-3)
@@ -530,21 +648,34 @@ def main():
         p.error("Invalid hyperparameters")
     if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
         p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
-    rows=load_manifest(args.manifest)
-    args.native_shape=list(rows[0]["x"].shape)
-    print(f"Native image shape (H,W): {tuple(args.native_shape)}",flush=True)
-    device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
+    if args.log_every < 0:
+        p.error("--log-every must be >= 0")
     root=Path(args.out)
     root.mkdir(parents=True,exist_ok=False)
+    setup_logging(root)
+    LOG.info("[Dataset] loading and auditing manifest")
+    try:
+        rows=load_manifest(args.manifest)
+    except Exception:
+        LOG.exception("[Dataset] audit failed")
+        raise
+    args.native_shape=list(rows[0]["x"].shape)
+    LOG.info("Native image shape (H,W): %s",tuple(args.native_shape))
+    device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
+    LOG.info("[Device] %s | %s",torch.cuda.get_device_name(device) if device.type=="cuda" else "CPU",gpu_memory(device))
+    LOG.info("[Config] epochs=%d batch=%d lr=%g seed=%d recall=%s region_recall=%s",
+             args.epochs,args.batch,args.lr,args.seed,pct(args.recall),pct(args.region_recall))
     protocols=[]
     if args.protocol in ("pooled","both"): protocols.append(("pooled",None))
     if args.protocol in ("leave-one-equipment-out","both"):
         protocols += [(f"holdout_{i:02d}",eq) for i,eq in enumerate(sorted({r["equipment"] for r in rows}),1)]
     index=[]
-    for name,eq in protocols:
+    for proto_num,(name,eq) in enumerate(protocols,1):
+        LOG.info("[Protocol %d/%d] %s heldout_equipment=%s",proto_num,len(protocols),name,eq or "none")
         try:
             parts=split_rows(rows,eq)
         except ValueError as e:
+            LOG.warning("[Protocol skipped] %s: %s",name,e)
             index.append(dict(protocol=name,equipment=eq,status="skipped",error=str(e)))
             continue
         results=run_protocol(parts,args,device,root/name)
@@ -554,7 +685,8 @@ def main():
     (root/"index.html").write_text("<meta charset='utf-8'><h1>CSAM experiment reports</h1>"+"".join(
         f"<p>{html.escape(str(r['equipment']))}: {html.escape(r['status'])} "+
         (f"<a href='{r['protocol']}/report.html'>{r['protocol']}</a>" if r["status"]!="skipped" else html.escape(r["error"]))+"</p>" for r in index),encoding="utf-8")
-    print(f"Report: {root/'index.html'}")
+    LOG.info("Report: %s",root/"index.html")
+    LOG.info("Log: %s",root/"run.log")
     if any(r["status"]!="ok" for r in index):
         raise SystemExit(2)
 
