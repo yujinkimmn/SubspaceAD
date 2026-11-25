@@ -202,11 +202,24 @@ def cnn_maps(model, rows, args, device):
         maps.extend(model(x.to(device)).sigmoid().cpu().numpy()[:,0])
     return np.asarray(maps)
 
-def threshold_for(rows, maps, recall):
+def threshold_for(rows, maps, recall, region_recall=.90):
     positive = sorted((float(m.max()) for r,m in zip(rows,maps) if r["label"] == 1), reverse=True)
     if not positive:
         raise ValueError("Validation has no positive images")
-    return positive[max(0, math.ceil(recall * len(positive))-1)]
+    thresholds = [positive[max(0, math.ceil(recall * len(positive))-1)]]
+    buckets = defaultdict(list)
+    if region_recall > 0:
+        for r,m in zip(rows,maps):
+            lab,n = ndimage.label(r["y"] > 0, structure=np.ones((3,3)))
+            for j in range(1,n+1):
+                obj = lab == j
+                area = obj.sum()
+                if area <= 4:
+                    buckets["1px" if area == 1 else "2-4px"].append(float(m[obj].max()))
+        for vals in buckets.values():
+            vals.sort(reverse=True)
+            thresholds.append(vals[math.ceil(region_recall * len(vals))-1])
+    return min(thresholds)
 
 def summarize(rows, maps, threshold):
     tp = fp = tn = fn = inter = union = predpix = truepix = 0
@@ -273,6 +286,7 @@ def train_cnn(exp, parts, args, device, out):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     teacher = copy.deepcopy(model).eval() if idx==7 else None
     best, best_state, history = None, None, []
+    pseudo_pos_total = 0
     for epoch in range(args.epochs):
         model.train()
         running = []
@@ -290,6 +304,7 @@ def train_cnn(exp, parts, args, device, out):
                 pp,pn = pseudo>=.98,pseudo<=.02
                 terms = []
                 if pp.any():
+                    pseudo_pos_total += int(pp.sum())
                     terms.append(F.binary_cross_entropy_with_logits(student[pp],torch.ones_like(student[pp])))
                 if pn.any() and pp.any():
                     terms.append(F.binary_cross_entropy_with_logits(student[pn],torch.zeros_like(student[pn])))
@@ -304,15 +319,17 @@ def train_cnn(exp, parts, args, device, out):
                         t.mul_(.99).add_(p,alpha=.01)
             running.append(float(loss.detach()))
         vm = cnn_maps(model,parts["val"],args,device)
-        th = threshold_for(parts["val"],vm,args.recall)
+        th = threshold_for(parts["val"],vm,args.recall,args.region_recall)
         met = metrics(parts["val"],vm,th)
         key = rank_key(met,args)
         history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th))
         if best is None or key < best:
             best,best_state = key,copy.deepcopy(model.state_dict())
+    if idx == 7 and pseudo_pos_total == 0:
+        raise SkipExperiment("No confident positive pseudo-labels accepted; semi-supervision not exercised")
     model.load_state_dict(best_state)
     torch.save({"state_dict":model.state_dict(),"mix":idx>=6},out/"model.pt")
-    (out/"history.json").write_text(json.dumps(history,indent=2),encoding="utf-8")
+    (out/"history.json").write_text(json.dumps({"epochs":history,"pseudo_positive_pixels":pseudo_pos_total},indent=2),encoding="utf-8")
     return lambda rows: cnn_maps(model,rows,args,device)
 
 def rank_key(m,args):
@@ -455,16 +472,17 @@ def run_protocol(parts,args,device,out):
                 model=Padim(args,device)
                 model.fit([r for r in parts["train"] if r["label"]==0])
                 torch.save(dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,smooth=args.padim_smooth),dest/"model.pt")
+                                size=args.padim_size,smooth=args.padim_smooth,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
                 predict=model.maps
             else:
                 predict=train_cnn(exp,parts,args,device,dest)
             vm=predict(parts["val"])
-            th=threshold_for(parts["val"],vm,args.recall)
+            th=threshold_for(parts["val"],vm,args.recall,args.region_recall)
             tm=predict(parts["test"])
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
             val,test=metrics(parts["val"],vm,th),metrics(parts["test"],tm,th)
+            (dest/"threshold.json").write_text(json.dumps({"threshold":th,"source":"validation"}),encoding="utf-8")
             save_eval(parts["val"],vm,th,dest,"val")
             save_eval(parts["test"],tm,th,dest,"test")
             result=dict(experiment=exp,status="ok",threshold=th,val=val,test=test)
