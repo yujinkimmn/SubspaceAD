@@ -11,6 +11,13 @@ def main():
     a=p.parse_args()
     index=json.loads((a.root/"index.json").read_text())
     assert (a.root/"index.html").is_file()
+    log=(a.root/"run.log").read_text(encoding="utf-8")
+    for token in ("[Dataset]", "[Device]", "[Protocol", "[Data]", "[Experiment", "[Epoch", "[Batch", "[Validation]", "[Memory]", "[Aug]", "Report:"):
+        assert token in log, token
+    assert "BEST UPDATED" in log or (a.semi and "[SKIPPED]" in log)
+    if not a.semi:
+        for token in ("[PaDiM fit]", "[Final Val]", "[Final Test]", "protocol_ETA_rough="):
+            assert token in log, token
     assert len(index)==(1 if a.semi else 4), index
     expected={"exp7_semi"} if a.semi else {
         "exp0_padim","exp1_cnn","exp2_normals","exp3_hard_negative",
@@ -33,8 +40,12 @@ def main():
             assert r["val"]["recall"]>=.95-1e-7,r
             for k in ("1px","2-4px"):
                 assert r["val"]["regions"][k]["recall"]>=.90-1e-7,r
-            if a.semi:
-                assert json.loads((d/"history.json").read_text())["pseudo_positive_pixels"] > 0
+            if r["experiment"] != "exp0_padim":
+                history=json.loads((d/"history.json").read_text())
+                assert history["best_epoch"] is not None
+                assert all("paste_successes" in e and "best_updated" in e and "mixstyle_calls" in e for e in history["epochs"])
+                if a.semi:
+                    assert history["pseudo_positive_pixels"] > 0
             assert list((d/"test").glob("*.npy"))
             assert list((d/"test").glob("*_mask.png"))
             print(row["protocol"],r["experiment"],"OK")
