@@ -7,6 +7,7 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument("root",type=Path)
     p.add_argument("--semi",action="store_true")
+    p.add_argument("--require-semi-update",action="store_true")
     a=p.parse_args()
     index=json.loads((a.root/"index.json").read_text())
     assert (a.root/"index.html").is_file()
@@ -21,7 +22,7 @@ def main():
         assert (directory/"report.html").is_file()
         assert (directory/"summary.csv").is_file()
         for r in results:
-            if a.semi and r["status"]=="skipped":
+            if a.semi and not a.require_semi_update and r["status"]=="skipped":
                 assert "No confident positive pseudo-labels accepted" in r["error"],r
                 print("Semi-supervised skip behavior verified; training with accepted labels NOT verified")
                 continue
@@ -32,6 +33,8 @@ def main():
             assert r["val"]["recall"]>=.95-1e-7,r
             for k in ("1px","2-4px"):
                 assert r["val"]["regions"][k]["recall"]>=.90-1e-7,r
+            if a.semi:
+                assert json.loads((d/"history.json").read_text())["pseudo_positive_pixels"] > 0
             assert list((d/"test").glob("*.npy"))
             assert list((d/"test").glob("*_mask.png"))
             print(row["protocol"],r["experiment"],"OK")
