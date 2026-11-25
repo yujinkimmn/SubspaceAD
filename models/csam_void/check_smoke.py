@@ -11,6 +11,13 @@ def main():
     a=p.parse_args()
     index=json.loads((a.root/"index.json").read_text())
     assert (a.root/"index.html").is_file()
+    consolidated=(a.root/"index.html").read_text(encoding="utf-8")
+    assert "CSAM consolidated report" in consolidated
+    assert "Per-equipment metrics" in consolidated
+    assert "Test image FPR" in consolidated
+    assert (a.root/"summary.csv").is_file()
+    for p in index:
+        assert p["protocol"] in consolidated
     log=(a.root/"run.log").read_text(encoding="utf-8")
     for token in ("[Dataset]", "[Device]", "[Protocol", "[Data]", "[Experiment", "[Epoch", "[Batch", "[Validation]", "[Memory]", "[Aug]", "Report:"):
         assert token in log, token
