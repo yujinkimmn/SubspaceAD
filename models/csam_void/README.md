@@ -8,7 +8,26 @@
 
     python -m pip install -r models/csam_void/requirements.txt
 
-Exp0은 기본적으로 torchvision 공식 ImageNet ResNet18 가중치를 최초 다운로드한다. 폐쇄망에서는 사전 승인된 로컬 torchvision ResNet18 state_dict를 준비하고 --padim-weights로 지정한다. 데이터는 전송하지 않는다.
+### Pretrained Weight 사전 다운로드 (폐쇄망 / 오프라인 실행)
+
+| 실험 | 필요한 가중치 | 공식 다운로드 |
+|---|---|---|
+| Exp0 — PaDiM | ResNet18 ImageNet-1K V1 (`resnet18-f37072fd.pth`, 약 44.7 MiB) | [PyTorch 공식 가중치 다운로드](https://download.pytorch.org/models/resnet18-f37072fd.pth) |
+| Exp1–7 — CNN, MixStyle, Semi-supervised 등 | 없음 (처음부터 학습) | — |
+
+- 공식 모델 문서: [torchvision ResNet18](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html)
+- 인터넷 연결이 가능한 PC에서 가중치를 다운로드하고, 사내 보안 절차에 따라 로컬 PC로 반입한다.
+- 예시 저장 경로: `D:/pretrained_weights/resnet18-f37072fd.pth`
+- 파일의 SHA-256을 확인하려면 PowerShell에서 `Get-FileHash D:/pretrained_weights/resnet18-f37072fd.pth -Algorithm SHA256`을 실행한다. 공식 파일명에 포함된 SHA-256 접두사는 `f37072fd`이다. 접두사 확인은 전체 해시 검증을 대체하지 않는다.
+- `--padim-weights`를 지정하면 Exp0이 로컬 가중치를 읽으며 torchvision의 자동 가중치 다운로드를 사용하지 않는다. Exp1–7은 외부 모델이 필요 없다. Python 의존성은 별도 설치되어 있어야 한다.
+
+폐쇄망 전체 실험 실행 예시:
+
+```powershell
+python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/run01 --protocol both --padim-weights D:/pretrained_weights/resnet18-f37072fd.pth
+```
+
+인터넷 사용이 가능한 환경에서만 `--padim-weights`를 생략해 공식 가중치를 자동 다운로드하도록 할 수 있다. 모델 파일, 사내 데이터, 학습 결과는 GitHub에 커밋하지 않는다.
 
 ## 2. Dataset
 
