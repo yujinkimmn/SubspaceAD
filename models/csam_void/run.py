@@ -682,9 +682,8 @@ def main():
         status="ok" if all(r["status"]=="ok" for r in results) else "partial"
         index.append(dict(protocol=name,equipment=eq,status=status))
     (root/"index.json").write_text(json.dumps(index,indent=2),encoding="utf-8")
-    (root/"index.html").write_text("<meta charset='utf-8'><h1>CSAM experiment reports</h1>"+"".join(
-        f"<p>{html.escape(str(r['equipment']))}: {html.escape(r['status'])} "+
-        (f"<a href='{r['protocol']}/report.html'>{r['protocol']}</a>" if r["status"]!="skipped" else html.escape(r["error"]))+"</p>" for r in index),encoding="utf-8")
+    from build_report import build_report
+    build_report(root,index)
     LOG.info("Report: %s",root/"index.html")
     LOG.info("Log: %s",root/"run.log")
     if any(r["status"]!="ok" for r in index):
