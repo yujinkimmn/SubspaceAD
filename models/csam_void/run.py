@@ -32,11 +32,12 @@ def seed_all(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-def read_image(path, mask=False):
+def read_image(path, mask=False, expected_shape=None):
     with Image.open(path) as im:
         a = np.asarray(im)
-    if a.shape != (H, W):
-        raise ValueError(f"{path}: expected grayscale {H}x{W}, got {a.shape}")
+    allowed = (expected_shape,) if expected_shape is not None else ((H, W), (W, H))
+    if a.shape not in allowed:
+        raise ValueError(f"{path}: expected grayscale H,W in {allowed}, got {a.shape}")
     if mask:
         return (a > 0).astype(np.float32)
     if a.dtype == np.uint8:
@@ -63,8 +64,8 @@ def load_manifest(path):
             if label == -1 and split != "train":
                 raise ValueError("Unlabeled samples allowed only in train")
             p = (path.parent / r["image"]).resolve()
-            x = read_image(p)
-            m = read_image((path.parent / r["mask"]).resolve(), True) if r["mask"].strip() else np.zeros_like(x)
+            x = read_image(p, expected_shape=rows[0]["x"].shape if rows else None)
+            m = read_image((path.parent / r["mask"]).resolve(), True, expected_shape=x.shape) if r["mask"].strip() else np.zeros_like(x)
             if label == 1 and not m.any():
                 raise ValueError(f"Positive requires a nonempty mask: row {i}")
             if label != 1 and m.any():
@@ -79,6 +80,8 @@ def load_manifest(path):
             hashes[digest] = i
             rows.append(dict(id=str(i), image=str(p), x=x, y=m, label=label,
                              split=split, equipment=eq, lot=lot))
+    if not rows:
+        raise ValueError("Empty manifest")
     return rows
 
 def split_rows(rows, heldout=None):
@@ -353,11 +356,13 @@ class Padim:
         self.channels = torch.randperm(448,generator=torch.Generator().manual_seed(args.seed))[:args.padim_dim].to(device)
     @torch.no_grad()
     def features(self,x):
-        x = F.interpolate(x.to(self.device),size=(round(H*self.args.padim_size/W),self.args.padim_size),
-                          mode="bilinear",align_corners=False)
-        h,w=x.shape[-2:]
-        pad=self.args.padim_size-h
-        x=F.pad(x,(0,0,pad//2,pad-pad//2),mode="replicate").repeat(1,3,1,1)
+        native_h,native_w=x.shape[-2:]
+        size=self.args.padim_size
+        scale=size/max(native_h,native_w)
+        h,w=round(native_h*scale),round(native_w*scale)
+        x=F.interpolate(x.to(self.device),size=(h,w),mode="bilinear",align_corners=False)
+        top,left=(size-h)//2,(size-w)//2
+        x=F.pad(x,(left,size-w-left,top,size-h-top),mode="replicate").repeat(1,3,1,1)
         x=(x-x.new_tensor([.485,.456,.406])[None,:,None,None])/x.new_tensor([.229,.224,.225])[None,:,None,None]
         n=self.net
         a=n.layer1(n.maxpool(n.relu(n.bn1(n.conv1(x)))))
@@ -365,7 +370,7 @@ class Padim:
         f=torch.cat([a,F.interpolate(b,size=a.shape[-2:],mode="nearest"),
                      F.interpolate(c,size=a.shape[-2:],mode="nearest")],1)[:,self.channels]
         self.shape=f.shape[-2:]
-        return f.flatten(2).transpose(1,2), (pad//2,h)
+        return f.flatten(2).transpose(1,2), (top,left,h,w)
     @torch.no_grad()
     def fit(self,rows):
         # Streaming first and second moments, avoiding all N feature maps in RAM.
@@ -387,12 +392,12 @@ class Padim:
     def maps(self,rows):
         out=[]
         for x,_ in DataLoader(Samples(rows),batch_size=self.args.batch):
-            f,(top,h)=self.features(x)
+            f,(top,left,h,w)=self.features(x)
             d=(f-self.mu).unsqueeze(-1)
             z=torch.linalg.solve_triangular(self.chol,d,upper=False)
             score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
             score=F.interpolate(score,size=(self.args.padim_size,)*2,mode="bilinear",align_corners=False)
-            score=F.interpolate(score[:,:,top:top+h],size=(H,W),mode="bilinear",align_corners=False)
+            score=F.interpolate(score[:,:,top:top+h,left:left+w],size=x.shape[-2:],mode="bilinear",align_corners=False)
             out.extend(ndimage.gaussian_filter(a, self.args.padim_smooth) for a in score[:,0].cpu().numpy())
         return np.asarray(out)
 
@@ -416,7 +421,7 @@ def save_eval(rows,maps,th,out,split):
                 rgb[m>=th]=[255,65,65]
                 rgb[r["y"]>0]=[65,255,65]
                 rgb[(m>=th)&(r["y"]>0)]=[255,255,0]
-                Image.fromarray(rgb).resize((W*4,H*4),Image.Resampling.NEAREST).save(dest/(r["id"]+"_overlay.png"))
+                Image.fromarray(rgb).resize((rgb.shape[1]*4,rgb.shape[0]*4),Image.Resampling.NEAREST).save(dest/(r["id"]+"_overlay.png"))
 
 def report(results,out,args):
     (out/"results.json").write_text(json.dumps(results,indent=2,allow_nan=False),encoding="utf-8")
@@ -473,7 +478,7 @@ def run_protocol(parts,args,device,out):
                 model=Padim(args,device)
                 model.fit([r for r in parts["train"] if r["label"]==0])
                 torch.save(dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,smooth=args.padim_smooth,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
+                                size=args.padim_size,smooth=args.padim_smooth,native_shape=args.native_shape,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
                 predict=model.maps
             else:
                 predict=train_cnn(exp,parts,args,device,dest)
@@ -526,6 +531,8 @@ def main():
     if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
         p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
     rows=load_manifest(args.manifest)
+    args.native_shape=list(rows[0]["x"].shape)
+    print(f"Native image shape (H,W): {tuple(args.native_shape)}",flush=True)
     device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
     root=Path(args.out)
     root.mkdir(parents=True,exist_ok=False)
