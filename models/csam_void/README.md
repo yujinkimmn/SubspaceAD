@@ -61,3 +61,5 @@ Threshold는 validation에서 이미지 recall 및 존재하는 1px/2–4px 연�
 합성 데모는 연결/출력 확인 용도이며 실제 성능 근거가 아니다. Exp7은 2 epoch smoke에서 skip될 수 있다. 일부 단계 실패/skip 시 나머지 실험을 계속하며 종료 코드 2 및 error.txt/보고서에 이유를 남긴다.
 
 원리 참고: [PaDiM](https://arxiv.org/abs/2011.08785), [MixStyle](https://arxiv.org/abs/2104.02008). 이 구현은 논문 모델 재현이 아닌 CSAM 특화 실험용 독립 코드이다.
+
+CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled/holdout Exp0~6과 Exp7을 실행한다. Exp0의 CI용 ResNet18은 다운로드 없는 random weights로 연결만 검증한다. Exp7의 실제 update 경로 확인용 낮은 confidence threshold는 합성 smoke 전용이며 실데이터 기본값은 `--pseudo-positive 0.98 --pseudo-negative 0.02`이다. Exp7의 선택 checkpoint는 pseudo-label update 이후 epoch로 제한된다.
