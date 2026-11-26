@@ -30,6 +30,9 @@ class TestStandaloneReport(unittest.TestCase):
             self.assertIn("&lt;not enough&gt;",s)
             self.assertIn("results.json missing",s)
             self.assertIn("no test positives",s)
+            self.assertIn("처음 보는 분을 위한 결과 읽는 법",s)
+            self.assertIn("지표 사전",s)
+            self.assertNotIn("id='padim-guide'",s)
             self.assertNotIn("src=",s)
             self.assertNotIn("pooled/report.html",s)
             self.assertFalse((p/"report.html").exists())
@@ -42,5 +45,45 @@ class TestStandaloneReport(unittest.TestCase):
             self.assertEqual(rows[-1]["status"],"missing")
             self.assertEqual(build_report(root),target)
             self.assertEqual(target.read_text(encoding="utf-8"),s)
+
+    def test_padim_guide_and_matched_validation_deltas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            p=root/"pooled"
+            p.mkdir()
+            index=[dict(protocol="pooled",equipment=None,status="partial")]
+            (root/"index.json").write_text(json.dumps(index))
+
+            def metric(fpr,recall,small):
+                return dict(fpr=fpr,recall=recall,worst_equipment_fpr=fpr,
+                            regions={"1px":{"recall":small}})
+
+            base=metric(.10,.95,.80)
+            improved=metric(.05,.95,.90)
+            # Test has deliberately opposite changes; matched deltas must use validation only.
+            results=[
+                dict(experiment="p0_pretrained",status="ok",val=base,test=improved),
+                dict(experiment="p1_classification",status="ok",val=improved,test=base),
+                dict(experiment="p2_classification_mixstyle",status="skipped",error="one equipment"),
+                dict(experiment="p3_consistency",status="ok",val=base,test=base),
+                dict(experiment="p4_consistency_mixstyle",status="failed",error="failed"),
+            ]
+            (p/"results.json").write_text(json.dumps(results))
+            (p/"selected.json").write_text(json.dumps({"selected_by_validation":"p1_classification"}))
+            s=build_report(root).read_text(encoding="utf-8")
+            self.assertIn("id='padim-guide'",s)
+            self.assertIn("P0–P5: 무엇이 다른가?",s)
+            self.assertIn("실험별 학습 효과 비교 (validation)",s)
+            self.assertIn("P0 → P1",s)
+            self.assertIn("P1 → P2",s)
+            self.assertIn("-5.00 pp",s)
+            self.assertIn("+10.00 pp",s)
+            self.assertIn("+0.00 pp",s)
+            self.assertIn("—",s)
+            self.assertNotIn("+5.00 pp",s)
+            self.assertIn("p1_classification ★",s)
+            self.assertNotIn("src=",s)
+            self.assertNotIn("https://",s)
 if __name__=="__main__":
     unittest.main()
+

@@ -93,6 +93,8 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 
 ## 7. 독립형 통합 보고서 (오프라인)
 
+통합 `index.html`에는 처음 보는 사람을 위한 한국어 안내와 Image/Pixel/Region metric 사전이 포함된다. P0–P5 결과에는 각 실험의 목적과 matched ablation pair별 validation FPR/Recall 변화(pp)도 표시된다. 기존 metric과 validation-selected 기준은 그대로 유지된다.
+
 전체 실험 완료 시 출력 루트에 `index.html`과 통합 `summary.csv`를 자동 생성한다. index.html 하나만 다른 PC로 복사해도 모든 protocol/실험의 validation·test 지표, validation-selected 모델, holdout 비교, 설비별 상세 지표, region hit/count, 0–100% 비교 막대그래프를 볼 수 있다. HTML/CSS가 내장되어 인터넷이나 Python, 다른 HTML 파일이 필요 없다. Test로 모델을 재선택하지 않는다. 실험 상태/오류 및 N/A도 그대로 표시한다. 통합 CSV는 overall/equipment scope와 split을 구분하고, 기존 하위 폴더의 summary.csv와 report.html은 유지한다.
 
 기존 완료 결과에서 재학습 없이 통합 보고서 생성 (Python 표준 라이브러리만 사용):
@@ -102,6 +104,8 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 기존 출력 루트의 index.json, 각 완료 protocol의 results.json 및 selected.json, config.json(선택 기준·목표 표시)이 필요하다. 기존 하위 report.html이 없어도 성능 수치는 생성된다. 결과 JSON이 누락되면 해당 protocol에 missing 안내를 표시한다. 기존 index.html 및 루트 summary.csv는 새 버전으로 교체된다. 3-panel 이미지와 개별 scores.csv는 HTML에 내장하지 않으므로 필요할 때만 원래 하위 폴더를 함께 복사한다. 설비명과 성능 수치도 사내 보안 정책에 따라 취급한다.
 
 ## 8. P0–P5 PaDiM Backbone adaptation (MixStyle)
+
+[P0–P5 상세 실험 정리 및 결과 해석 가이드](PADIM_EXPERIMENTS.md) — 공통 조건, 모델별 학습 방법, MixStyle 원리, 평가 metric, matched pair 비교 및 결과 확인 방법.
 
 별도 진입점으로 P0–P5를 순서대로 실행한다. 공식 timm `resnet18.a1_in1k` 가중치를 반드시 로컬로 지정한다. 각 실험은 동일한 초기 가중치, seed, manifest split, 원본 H/W 각각 4배 확대(패딩 없음), feature layer1/2, 192개 중 40개 channel 선택 및 Gaussian fit 설정을 사용한다. 이전 실험의 weight를 이어받지 않는다.
 
@@ -127,7 +131,7 @@ P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한
 
 `run_padim.py`의 기본값은 `--upsample-factor 4 --max-layer-depth 2 --n-features 40`이다. 예: native (H,W)=(81,61) → bilinear (324,244), padding 없음 → layer1 (64,81,61), layer2 (128,41,31) → nearest feature alignment → 192 channels 중 seed로 40개 선택 → 위치별 40차원 Gaussian. Fine-tuning head와 fixed teacher도 동일한 layer1/2만 사용하고, MixStyle은 stem 및 layer1 출력에서 다음 layer 입력에 적용한다. layer3/4 및 fc는 사용하지 않고 weight 변경하지 않는다. 입력 및 mask 방향을 유지한다. Factor 4에서 layer1 grid가 native와 같아 score map 및 P5 logits를 불필요하게 4배 확대 후 다시 축소하지 않는다. 다른 factor에서는 native shape로 bilinear 복원한다.
 
-옵션은 `--upsample-factor` / `--upsample_factor`, `--max-layer-depth` / `--max_layer_depth`, `--n-features` / `--n_features` / 기존 `--padim-dim`을 지원한다. `--padim-size 224`는 기존 square letterbox 방식 선택이며 factor와 동시 지정할 수 없다. depth 1/2/3에서 최대 channel 수는 64/192/448이다. 기존 `run.py`의 기본값은 기존대로 224 square, depth 3, 100 features이며 같은 Best 옵션을 명시해서 Exp0와 P0를 직접 비교할 수 있다. 저장된 `model.pt`에 geometry, layer depth, n_features, feature_shape 및 선택 channel index를 남긴다. 기존 사내 모델의 bilinear/normalization/feature selection/score smoothing까지 일치하는지는 별도 확인해야 한다.
+옵션은 `--upsample-factor` / `--upsample_factor`, `--max-layer-depth` / `--max_layer_depth`, `--n-features` / `--n_features` / 기존 `--padim-dim`을 지원한다. `--padim-size 224`는 기존 square letterbox 방식 선택이며 factor와 동시 지정할 수 없다. depth 1/2/3에서 최대 channel 수는 64/192/448이다. 현재 `run.py`의 Exp0도 동일하게 4배, depth 2, 40 features를 기본 사용하므로 동일한 입력/seed/가중치 설정에서 P0와 직접 비교할 수 있다. 저장된 `model.pt`에 geometry, layer depth, n_features, feature_shape 및 선택 channel index를 남긴다. 기존 사내 모델의 bilinear/normalization/feature selection/score smoothing까지 일치하는지는 별도 확인해야 한다.
 
 
 ## 9. 기존 anomalib 실험과 평가 metric 통일
@@ -147,3 +151,4 @@ anomalib validation/test hook의 흐름대로 Val AUROC는 raw native map 및 ra
 이 구현은 anomalib 기본 후처리와 표준 지표 정의를 따르는 독립 구현이며, anomalib 버전별 F1 tie 처리/AUPRO 구현, map 복원/보간 등의 수치 일치가 보장되지는 않는다. 참조: [OneClassPostProcessor](https://github.com/open-edge-platform/anomalib/blob/main/src/anomalib/post_processing/one_class.py), [metrics](https://anomalib.readthedocs.io/en/stable/markdown/guides/reference/metrics/index.html). 기존 weight/전처리/threshold 방식으로 생성된 모델 및 결과와는 직접 수치 비교하지 말고 새로 Gaussian fit 및 평가를 수행한다.
 
 이전에 생성한 결과 JSON에는 새 지표가 없으므로 build_report.py로 HTML만 재생성하면 N/A로 표시된다. 새 평가 결과를 얻으려면 새 출력 경로로 실험을 실행한다. 픽셀 지표 계산은 전체 split 점수 정렬을 사용하므로 큰 데이터셋에서는 추가 CPU 메모리와 시간이 필요하다.
+
