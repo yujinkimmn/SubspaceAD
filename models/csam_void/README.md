@@ -87,7 +87,19 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 
 ## 6. 실시간 로그
 
-실행 명령은 그대로 유지한다. 콘솔과 출력 루트의 `run.log`에 동일한 로그를 남긴다. 각 protocol의 설비별 normal/void/unlabeled/lot 수량, 현재 실험, epoch, batch, 평균 loss, validation recall/FPR/worst FPR/Dice/IoU/크기별 region recall, threshold, best 갱신, 경과 시간 및 ETA를 표시한다. CUDA 메모리는 PyTorch allocated/reserved/peak allocated와 GPU 전체 용량(MiB)이며 전체 시스템 GPU 사용량이나 GPU utilization(%)이 아니다. `--log-every 50`은 기본 batch 출력 간격이며 `--log-every 10`으로 더 자주 출력, `--log-every 0`은 batch 로그만 끈다. Epoch 로그는 계속 출력된다. ETA는 완료된 작업의 평균으로 계산하며 실험별 소요시간 차이 때문에 protocol ETA는 거친 추정치이다. PaDiM은 epoch 없이 정상 feature 집계와 covariance 계산을 표시한다.
+기본 콘솔 출력은 tqdm 기반 compact progress이다. 현재 protocol/experiment, train epoch/batch/loss, validation·Gaussian fit·test·panel 저장 진행률 및 ETA를 한 줄씩 갱신한다. 완료된 실험은 사용 중인 표준 val/test metric, FPR/Recall/작은 영역 Recall, worst-equipment FPR, 소요 시간만 요약한다. Validation으로 선택된 모델과 보고서 경로, 실패/skip 경고도 표시한다.
+
+상세한 기존 로그(설비별 데이터 수량, epoch/batch loss, val metric, threshold, weight/MixStyle 진단, best 갱신, CUDA 메모리, ETA 등)는 출력 루트의 `run.log`에 계속 기록한다. 콘솔 progress bar는 로그 파일에 쓰지 않는다. CUDA 메모리는 PyTorch allocated/reserved/peak allocated와 GPU 전체 용량(MiB)이며 GPU utilization(%)이 아니다.
+
+| 옵션 | 의미 |
+|---|---|
+| `--progress auto` (기본) | 실제 터미널에서는 tqdm, 출력 리다이렉션/비대화형 환경에서는 깨끗한 단계/epoch 요약 |
+| `--progress on` | tqdm 강제로 사용 (터미널 감지가 안 되는 환경에서) |
+| `--progress off` | 한 줄씩 출력하는 간결한 텍스트 모드 |
+| `--verbose` | `run.log`의 상세 일반 로그도 콘솔에 표시 |
+| `--log-every 50` | 상세 파일 로그의 batch 간격; `0`으로 batch 로그를 끄더라도 progress는 유지 |
+
+`tqdm`을 requirements에 명시했으므로 기존 환경에서는 `python -m pip install "tqdm>=4.66,<5"`로 추가 설치할 수 있다. 누락 시 compact text 모드로 fallback하며 기존 학습을 막지 않는다. tqdm의 ETA는 현재 단계에서 관측한 평균 속도 기반 추정치이다.
 
 `[Aug]`는 해당 epoch의 성공/시도 copy-paste 횟수, supervised domain augmentation 샘플 수, MixStyle 호출 횟수(실제 적용, Exp7의 student unlabeled forward 포함), accepted positive pseudo pixel 수를 보여준다. 같은 이미지를 반복 sampling할 수 있으므로 독립 이미지 수가 아니다. `history.json`은 epoch마다 업데이트되어 학습 중에도 읽을 수 있으며 best_epoch, best_updated, seconds 및 augmentation count가 추가되었다. Exp7이 pseudo label 부족으로 skip되어도 진행된 epoch의 history가 남는다. 학습 재개 기능은 제공하지 않는다. 데이터 audit 실패도 run.log에 남기므로 재시도 시 새로운 --out 경로를 사용한다. 로그와 결과에는 사내 데이터 경로·설비 식별자가 포함될 수 있으므로 GitHub로 올리지 않는다.
 

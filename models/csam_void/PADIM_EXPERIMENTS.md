@@ -205,6 +205,8 @@ python -m pip check
 python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/padim01 --protocol both --padim-weights D:/pretrained_weights/resnet18_a1_0-d63eafa0.pth
 ```
 
+실행 중 기본 콘솔은 tqdm으로 현재 실험, backbone epoch/batch/loss, Gaussian fit·validation·test·시각화 저장의 진행률과 ETA를 보여준다. 최종 지표와 validation-selected 모델만 요약하며 상세 정보는 `run.log`에 남는다. 터미널에서 progress bar가 나타나지 않으면 `--progress on`, 상세 로그도 보려면 `--verbose`, 바 없이 텍스트만 보려면 `--progress off`를 사용한다.
+
 `--protocol pooled`만 지정하면 pooled 평가만 실행한다. 초기 확인용으로 `--epochs 2`를 지정할 수 있고 일부 실험은 아래와 같이 선택한다. 항상 새로운 출력 경로를 사용한다.
 
 ```powershell

@@ -10,6 +10,7 @@ from torch import nn
 import torch.nn.functional as F
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score
+from csam_progress import stage_progress, epoch_note
 from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
                  padim_input, padim_preprocess, restore_padim_map)
 
@@ -84,7 +85,7 @@ def tensors(rows,args,device,transform=None):
     return z.to(device),crop,torch.from_numpy(y[:,None]).to(device)
 
 @torch.no_grad()
-def proxy_eval(net,head,teacher,rows,args,device,supervised):
+def proxy_eval(net,head,teacher,rows,args,device,supervised,batch_done=None):
     scores=[]; labels=[]; losses=[]; inter=predpix=truepix=0
     for start in range(0,len(rows),args.batch):
         rr=rows[start:start+args.batch]
@@ -99,6 +100,8 @@ def proxy_eval(net,head,teacher,rows,args,device,supervised):
         else:
             changed,_,_=tensors(rr,args,device,lambda x:np.clip(x*1.10+.03,0,1))
             losses.append((len(rr),float(consistency(layers(net,changed,depth=args.max_layer_depth),layers(teacher,z,depth=args.max_layer_depth)))))
+        if batch_done is not None:
+            batch_done()
     if supervised:
         return {"head_image_auroc":float(roc_auc_score(labels,scores)) if len(set(labels))==2 else None,
                 "head_pixel_dice_at_0.5":2*inter/(predpix+truepix) if predpix+truepix else None}
@@ -138,45 +141,59 @@ def adapt_backbone(net,exp,parts,args,device,out):
     history=[]; started=time.perf_counter()
     LOG.info("[Backbone] %s supervised=%s cross_mix=%s train=%d val=%d steps=%d",
              exp,supervised,use_mix,len(train),len(val),steps)
-    for epoch in range(args.epochs):
-        st=time.perf_counter(); losses=[]; tasks=[]; anchors=[]
-        before=mix.applied if mix else 0
-        if mix is not None: mix.train()
-        for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised,args.seed+epoch),1):
-            clean,crop,y=tensors(rr,args,device)
-            domains=[r["equipment"] for r in rr]
-            if supervised:
-                logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,y.shape[-2:],args.upsample_factor)
-                labels=torch.tensor([r["label"] for r in rr],device=device,dtype=clean.dtype)
-                task=F.binary_cross_entropy_with_logits(logits.flatten(1).amax(1),labels)
-                anchor=loss_fn(logits,y,hard=True) if idx==5 else task.new_zeros(())
-                loss=task+args.pixel_weight*anchor
-            else:
-                augmented,_,_=tensors(rr,args,device,domain_aug)
-                with torch.no_grad(): target=layers(teacher,clean,depth=args.max_layer_depth)
-                task=consistency(layers(net,augmented,mix,domains,args.max_layer_depth),target)
-                anchor=consistency(layers(net,clean,depth=args.max_layer_depth),target)
-                loss=task+args.anchor_weight*anchor
-            if not torch.isfinite(loss):
-                raise ValueError("Nonfinite backbone loss")
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            losses.append(float(loss.detach())); tasks.append(float(task.detach())); anchors.append(float(anchor.detach()))
-            if args.log_every and (step%args.log_every==0 or step==steps):
-                LOG.info("[Backbone batch %d/%d] epoch=%d loss=%.6f | %s",step,steps,epoch+1,np.mean(losses),gpu_memory(device))
-        if mix is not None: mix.eval()
-        diagnostic=proxy_eval(net,head,teacher,val,args,device,supervised)
-        dt=time.perf_counter()-st
-        row=dict(epoch=epoch+1,loss=float(np.mean(losses)),task_loss=float(np.mean(tasks)),
-                 anchor_or_pixel_loss=float(np.mean(anchors)),mixstyle_calls=(mix.applied-before if mix else 0),
-                 val=diagnostic,seconds=dt)
-        history.append(row)
-        (out/"history.json").write_text(json.dumps({"epochs":history,"selected_epoch":args.epochs,
-                 "selection":"fixed final epoch; validation proxy is diagnostic only"},indent=2),encoding="utf-8")
-        LOG.info("[Backbone epoch %d/%d] loss=%.6f task=%.6f aux=%.6f mix_calls=%d val=%s elapsed=%s ETA=%s",
-                 epoch+1,args.epochs,row["loss"],row["task_loss"],row["anchor_or_pixel_loss"],row["mixstyle_calls"],
-                 diagnostic,elapsed(dt),elapsed((time.perf_counter()-started)/(epoch+1)*(args.epochs-epoch-1)))
+    label=exp.split("_",1)[0].upper()
+    val_batches=math.ceil(len(val)/args.batch)
+    with stage_progress(f"{label} backbone + validation", args.epochs*(steps+val_batches)) as train_bar:
+        for epoch in range(args.epochs):
+            train_bar.set_description_str(f"{label} backbone E{epoch+1}/{args.epochs}")
+            st=time.perf_counter(); losses=[]; tasks=[]; anchors=[]
+            before=mix.applied if mix else 0
+            if mix is not None: mix.train()
+            for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised,args.seed+epoch),1):
+                clean,crop,y=tensors(rr,args,device)
+                domains=[r["equipment"] for r in rr]
+                if supervised:
+                    logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,y.shape[-2:],args.upsample_factor)
+                    labels=torch.tensor([r["label"] for r in rr],device=device,dtype=clean.dtype)
+                    task=F.binary_cross_entropy_with_logits(logits.flatten(1).amax(1),labels)
+                    anchor=loss_fn(logits,y,hard=True) if idx==5 else task.new_zeros(())
+                    loss=task+args.pixel_weight*anchor
+                else:
+                    augmented,_,_=tensors(rr,args,device,domain_aug)
+                    with torch.no_grad(): target=layers(teacher,clean,depth=args.max_layer_depth)
+                    task=consistency(layers(net,augmented,mix,domains,args.max_layer_depth),target)
+                    anchor=consistency(layers(net,clean,depth=args.max_layer_depth),target)
+                    loss=task+args.anchor_weight*anchor
+                if not torch.isfinite(loss):
+                    raise ValueError("Nonfinite backbone loss")
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                losses.append(float(loss.detach())); tasks.append(float(task.detach())); anchors.append(float(anchor.detach()))
+                train_bar.set_postfix(batch=f"{step}/{steps}", loss=f"{losses[-1]:.4f}", refresh=False)
+                train_bar.update(1)
+                if args.log_every and (step%args.log_every==0 or step==steps):
+                    LOG.info("[Backbone batch %d/%d] epoch=%d loss=%.6f | %s",step,steps,epoch+1,np.mean(losses),gpu_memory(device))
+            if mix is not None: mix.eval()
+            train_bar.set_description_str(f"{label} proxy validation E{epoch+1}/{args.epochs}")
+            train_bar.set_postfix(refresh=False)
+            diagnostic=proxy_eval(net,head,teacher,val,args,device,supervised,batch_done=lambda:train_bar.update(1))
+            dt=time.perf_counter()-st
+            row=dict(epoch=epoch+1,loss=float(np.mean(losses)),task_loss=float(np.mean(tasks)),
+                     anchor_or_pixel_loss=float(np.mean(anchors)),mixstyle_calls=(mix.applied-before if mix else 0),
+                     val=diagnostic,seconds=dt)
+            history.append(row)
+            (out/"history.json").write_text(json.dumps({"epochs":history,"selected_epoch":args.epochs,
+                     "selection":"fixed final epoch; validation proxy is diagnostic only"},indent=2),encoding="utf-8")
+            LOG.info("[Backbone epoch %d/%d] loss=%.6f task=%.6f aux=%.6f mix_calls=%d val=%s elapsed=%s ETA=%s",
+                     epoch+1,args.epochs,row["loss"],row["task_loss"],row["anchor_or_pixel_loss"],row["mixstyle_calls"],
+                     diagnostic,elapsed(dt),elapsed((time.perf_counter()-started)/(epoch+1)*(args.epochs-epoch-1)))
+            proxy_key="head_image_auroc" if supervised else "fixed_photometric_consistency_loss"
+            proxy_value=diagnostic.get(proxy_key)
+            proxy_label="proxy_auc" if supervised else "proxy_loss"
+            formatted="N/A" if proxy_value is None else f"{proxy_value:.4f}"
+            train_bar.set_postfix(loss=f"{row['loss']:.4f}", **{proxy_label:formatted})
+            epoch_note("  %s E%d/%d | loss=%.4f | %s=%s",label,epoch+1,args.epochs,row["loss"],proxy_label,formatted)
     if use_mix and not mix.applied:
         raise SkipExperiment("No cross-equipment MixStyle calls occurred; increase training steps or mix probability")
     delta=max(float((net.state_dict()[k].detach().cpu()-v).abs().max()) for k,v in initial.items() if v.is_floating_point())

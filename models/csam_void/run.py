@@ -4,8 +4,6 @@ import csv
 import hashlib
 import html
 import json
-import logging
-import sys
 import math
 import random
 import time
@@ -15,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from visualization import jet_heatmap, panel_metadata_lines, save_panel
+from csam_progress import LOG, setup_logging, console_info, epoch_note, stage_progress
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
 import torch
@@ -27,20 +26,6 @@ PADIM_BACKBONE = "resnet18.a1_in1k"
 NORMALIZED_THRESHOLD = .5
 EXPS = ["exp0_padim", "exp1_cnn", "exp2_normals", "exp3_hard_negative",
         "exp4_copy_paste", "exp5_domain_aug", "exp6_mixstyle", "exp7_semi"]
-
-LOG = logging.getLogger("csam_void")
-
-def setup_logging(root):
-    LOG.setLevel(logging.INFO)
-    LOG.propagate = False
-    for handler in list(LOG.handlers):
-        LOG.removeHandler(handler)
-        handler.close()
-    fmt = logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
-    for handler in (logging.StreamHandler(sys.stdout),
-                    logging.FileHandler(root / "run.log", encoding="utf-8")):
-        handler.setFormatter(fmt)
-        LOG.addHandler(handler)
 
 def elapsed(seconds):
     seconds = max(0, int(seconds))
@@ -265,11 +250,15 @@ def loss_fn(logits, mask, hard=False):
     return sum(parts) / len(parts) + dice
 
 @torch.no_grad()
-def cnn_maps(model, rows, args, device):
+def cnn_maps(model, rows, args, device, desc=None, batch_done=None):
     model.eval()
     maps = []
-    for x, _ in DataLoader(Samples(rows), batch_size=args.batch):
-        maps.extend(model(x.to(device)).sigmoid().cpu().numpy()[:,0])
+    with stage_progress(desc,len(rows),unit="img") as bar:
+        for x, _ in DataLoader(Samples(rows), batch_size=args.batch):
+            maps.extend(model(x.to(device)).sigmoid().cpu().numpy()[:,0])
+            bar.update(len(x))
+            if batch_done is not None:
+                batch_done()
     return np.asarray(maps)
 
 def threshold_for(rows, maps, recall, region_recall=.90):
@@ -442,82 +431,93 @@ def train_cnn(exp, parts, args, device, out):
     train_start = time.perf_counter()
     LOG.info("[Train] normal=%d void=%d unlabeled=%d sampled_per_epoch=%d batches=%d epochs=%d",
              counts[0], counts[1], len(unlabeled), len(sampler), len(loader), args.epochs)
-    for epoch in range(args.epochs):
-        epoch_start = time.perf_counter()
-        ds.paste_attempts = ds.paste_successes = ds.aug_count = 0
-        mix_before = getattr(model.mix, "applied", 0)
-        pseudo_before = pseudo_pos_total
-        model.train()
-        running = []
-        LOG.info("[Epoch %02d/%02d] start", epoch+1, args.epochs)
-        for step,(x,y) in enumerate(loader,1):
-            x,y = x.to(device), y.to(device)
-            loss = loss_fn(model(x),y,hard=idx>=3)
-            if teacher is not None and epoch >= max(1,args.epochs//5):
-                u = np.stack([r["x"] for r in random.choices(unlabeled,k=len(x))])
-                weak = torch.from_numpy(u[:,None]).to(device)
-                strong = torch.from_numpy(np.stack([domain_aug(a) for a in u])[:,None]).to(device)
-                with torch.no_grad():
-                    pseudo = teacher(weak).sigmoid()
-                student = model(strong)
-                # Only trust confident pseudo positives and negatives, balance each class.
-                pp,pn = pseudo>=args.pseudo_positive,pseudo<=args.pseudo_negative
-                terms = []
-                if pp.any():
-                    pseudo_pos_total += int(pp.sum())
-                    terms.append(F.binary_cross_entropy_with_logits(student[pp],torch.ones_like(student[pp])))
-                if pn.any() and pp.any():
-                    terms.append(F.binary_cross_entropy_with_logits(student[pn],torch.zeros_like(student[pn])))
-                if terms:
-                    loss = loss + .25 * sum(terms)/len(terms)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            if teacher is not None:
-                with torch.no_grad():
-                    for t,p in zip(teacher.parameters(),model.parameters()):
-                        t.mul_(.99).add_(p,alpha=.01)
-            running.append(float(loss.detach()))
-            if args.log_every and (step % args.log_every == 0 or step == len(loader)):
-                dt = time.perf_counter() - epoch_start
-                LOG.info("[Batch %d/%d] epoch=%d loss_mean=%.5f elapsed=%s train_epoch_ETA=%s | %s",
-                         step, len(loader), epoch+1, float(np.mean(running)), elapsed(dt),
-                         elapsed(dt*(len(loader)-step)/step), gpu_memory(device))
-        LOG.info("[Validation] epoch=%d images=%d", epoch+1, len(parts["val"]))
-        vm = cnn_maps(model,parts["val"],args,device)
-        th = threshold_for(parts["val"],vm,args.recall,args.region_recall)
-        met = metrics(parts["val"],vm,th)
-        key = rank_key(met,args)
-        # Exp7 checkpoint must actually include a pseudo-label update.
-        updated = (idx != 7 or pseudo_pos_total > 0) and (best is None or key < best)
-        if updated:
-            best,best_state = key,copy.deepcopy(model.state_dict())
-            best_epoch = epoch+1
-        dt = time.perf_counter() - epoch_start
-        total = time.perf_counter() - train_start
-        eta = total/(epoch+1)*(args.epochs-epoch-1)
-        counters = dict(paste_attempts=ds.paste_attempts, paste_successes=ds.paste_successes,
-                        domain_aug_samples=ds.aug_count,
-                        mixstyle_calls=getattr(model.mix, "applied", 0)-mix_before,
-                        pseudo_positive_pixels=pseudo_pos_total-pseudo_before)
-        history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th,
-                            seconds=dt, best_updated=updated, **counters))
-        (out/"history.json").write_text(json.dumps({"epochs":history,
-              "pseudo_positive_pixels":pseudo_pos_total,"best_epoch":best_epoch},indent=2),encoding="utf-8")
-        LOG.info("[Epoch %02d/%02d] loss=%.5f | %s | %s | elapsed=%s experiment_train_ETA=%s",
-                 epoch+1,args.epochs,float(np.mean(running)),metric_line(met,th),
-                 "BEST UPDATED" if updated else f"best_epoch={best_epoch}",elapsed(dt),elapsed(eta))
-        if idx>=4:
-            LOG.info("[Aug] copy_paste=%d/%d domain_aug=%d mixstyle_calls=%d pseudo_positive_pixels=%d",
-                     counters["paste_successes"],counters["paste_attempts"],
-                     counters["domain_aug_samples"],counters["mixstyle_calls"],counters["pseudo_positive_pixels"])
-        LOG.info("[Memory] %s",gpu_memory(device))
+    label=exp.split("_",1)[0].upper()
+    val_batches=math.ceil(len(parts["val"])/args.batch)
+    with stage_progress(f"{label} train + validation", args.epochs*(len(loader)+val_batches)) as train_bar:
+        for epoch in range(args.epochs):
+            train_bar.set_description_str(f"{label} train E{epoch+1}/{args.epochs}")
+            epoch_start = time.perf_counter()
+            ds.paste_attempts = ds.paste_successes = ds.aug_count = 0
+            mix_before = getattr(model.mix, "applied", 0)
+            pseudo_before = pseudo_pos_total
+            model.train()
+            running = []
+            LOG.info("[Epoch %02d/%02d] start", epoch+1, args.epochs)
+            for step,(x,y) in enumerate(loader,1):
+                x,y = x.to(device), y.to(device)
+                loss = loss_fn(model(x),y,hard=idx>=3)
+                if teacher is not None and epoch >= max(1,args.epochs//5):
+                    u = np.stack([r["x"] for r in random.choices(unlabeled,k=len(x))])
+                    weak = torch.from_numpy(u[:,None]).to(device)
+                    strong = torch.from_numpy(np.stack([domain_aug(a) for a in u])[:,None]).to(device)
+                    with torch.no_grad():
+                        pseudo = teacher(weak).sigmoid()
+                    student = model(strong)
+                    # Only trust confident pseudo positives and negatives, balance each class.
+                    pp,pn = pseudo>=args.pseudo_positive,pseudo<=args.pseudo_negative
+                    terms = []
+                    if pp.any():
+                        pseudo_pos_total += int(pp.sum())
+                        terms.append(F.binary_cross_entropy_with_logits(student[pp],torch.ones_like(student[pp])))
+                    if pn.any() and pp.any():
+                        terms.append(F.binary_cross_entropy_with_logits(student[pn],torch.zeros_like(student[pn])))
+                    if terms:
+                        loss = loss + .25 * sum(terms)/len(terms)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                if teacher is not None:
+                    with torch.no_grad():
+                        for t,p in zip(teacher.parameters(),model.parameters()):
+                            t.mul_(.99).add_(p,alpha=.01)
+                running.append(float(loss.detach()))
+                train_bar.set_postfix(batch=f"{step}/{len(loader)}", loss=f"{running[-1]:.4f}", refresh=False)
+                train_bar.update(1)
+                if args.log_every and (step % args.log_every == 0 or step == len(loader)):
+                    dt = time.perf_counter() - epoch_start
+                    LOG.info("[Batch %d/%d] epoch=%d loss_mean=%.5f elapsed=%s train_epoch_ETA=%s | %s",
+                             step, len(loader), epoch+1, float(np.mean(running)), elapsed(dt),
+                             elapsed(dt*(len(loader)-step)/step), gpu_memory(device))
+            train_bar.set_description_str(f"{label} validation E{epoch+1}/{args.epochs}")
+            train_bar.set_postfix(refresh=False)
+            LOG.info("[Validation] epoch=%d images=%d", epoch+1, len(parts["val"]))
+            vm = cnn_maps(model,parts["val"],args,device,batch_done=lambda:train_bar.update(1))
+            th = threshold_for(parts["val"],vm,args.recall,args.region_recall)
+            met = metrics(parts["val"],vm,th)
+            key = rank_key(met,args)
+            # Exp7 checkpoint must actually include a pseudo-label update.
+            updated = (idx != 7 or pseudo_pos_total > 0) and (best is None or key < best)
+            if updated:
+                best,best_state = key,copy.deepcopy(model.state_dict())
+                best_epoch = epoch+1
+            dt = time.perf_counter() - epoch_start
+            total = time.perf_counter() - train_start
+            eta = total/(epoch+1)*(args.epochs-epoch-1)
+            counters = dict(paste_attempts=ds.paste_attempts, paste_successes=ds.paste_successes,
+                            domain_aug_samples=ds.aug_count,
+                            mixstyle_calls=getattr(model.mix, "applied", 0)-mix_before,
+                            pseudo_positive_pixels=pseudo_pos_total-pseudo_before)
+            history.append(dict(epoch=epoch+1, loss=float(np.mean(running)), val=met, threshold=th,
+                                seconds=dt, best_updated=updated, **counters))
+            (out/"history.json").write_text(json.dumps({"epochs":history,
+                  "pseudo_positive_pixels":pseudo_pos_total,"best_epoch":best_epoch},indent=2),encoding="utf-8")
+            LOG.info("[Epoch %02d/%02d] loss=%.5f | %s | %s | elapsed=%s experiment_train_ETA=%s",
+                     epoch+1,args.epochs,float(np.mean(running)),metric_line(met,th),
+                     "BEST UPDATED" if updated else f"best_epoch={best_epoch}",elapsed(dt),elapsed(eta))
+            if idx>=4:
+                LOG.info("[Aug] copy_paste=%d/%d domain_aug=%d mixstyle_calls=%d pseudo_positive_pixels=%d",
+                         counters["paste_successes"],counters["paste_attempts"],
+                         counters["domain_aug_samples"],counters["mixstyle_calls"],counters["pseudo_positive_pixels"])
+            LOG.info("[Memory] %s",gpu_memory(device))
+            train_bar.set_postfix(loss=f"{np.mean(running):.4f}", val_fpr=pct(met["fpr"]), val_recall=pct(met["recall"]))
+            epoch_note("  %s E%d/%d | loss=%.4f | val FPR=%s recall=%s", label,epoch+1,args.epochs,
+                       float(np.mean(running)),pct(met["fpr"]),pct(met["recall"]))
     if idx == 7 and pseudo_pos_total == 0:
         raise SkipExperiment("No confident positive pseudo-labels accepted; semi-supervision not exercised")
     model.load_state_dict(best_state)
     torch.save({"state_dict":model.state_dict(),"mix":idx>=6},out/"model.pt")
     LOG.info("[Checkpoint] selected_epoch=%d saved model.pt", best_epoch)
-    return lambda rows: cnn_maps(model,rows,args,device)
+    return lambda rows, desc=None: cnn_maps(model,rows,args,device,desc=desc)
 
 def rank_key(m,args):
     # Region hit recall is distinct from image recall. Prioritize floor violations.
@@ -602,44 +602,50 @@ class Padim:
         self.shape=f.shape[-2:]
         return f.flatten(2).transpose(1,2),crop
     @torch.no_grad()
-    def fit(self,rows):
+    def fit(self,rows,desc=None):
         # Streaming first and second moments, avoiding all N feature maps in RAM.
         n=0; s=q=None
-        for start in range(0,len(rows),self.args.batch):
-            x=[padim_input(r) for r in rows[start:start+self.args.batch]]
-            f,_=self.features(x)
-            f=f.double()
-            a=f.sum(0); b=torch.einsum("bpc,bpd->pcd",f,f)
-            s=a if s is None else s+a
-            q=b if q is None else q+b
-            n+=len(f)
-            if self.args.log_every and (n == len(rows) or math.ceil(n/self.args.batch)%self.args.log_every == 0):
-                LOG.info("[PaDiM fit] normals=%d/%d | %s", n,len(rows),gpu_memory(self.device))
-        LOG.info("[PaDiM fit] calculating covariance / Cholesky")
-        if n<2: raise ValueError("PaDiM requires >=2 normal training images")
-        mu=s/n
-        cov=(q-n*mu[:,:,None]*mu[:,None,:])/(n-1)
-        cov+=.01*torch.eye(cov.shape[-1],device=self.device,dtype=cov.dtype)
-        self.mu=mu.float()
-        self.chol=torch.linalg.cholesky(cov).float()
+        with stage_progress(desc,len(rows),unit="img") as bar:
+            for start in range(0,len(rows),self.args.batch):
+                x=[padim_input(r) for r in rows[start:start+self.args.batch]]
+                f,_=self.features(x)
+                f=f.double()
+                a=f.sum(0); b=torch.einsum("bpc,bpd->pcd",f,f)
+                s=a if s is None else s+a
+                q=b if q is None else q+b
+                n+=len(f)
+                bar.update(len(f))
+                if self.args.log_every and (n == len(rows) or math.ceil(n/self.args.batch)%self.args.log_every == 0):
+                    LOG.info("[PaDiM fit] normals=%d/%d | %s", n,len(rows),gpu_memory(self.device))
+            if desc:
+                bar.set_description_str(f"{desc} covariance")
+            LOG.info("[PaDiM fit] calculating covariance / Cholesky")
+            if n<2: raise ValueError("PaDiM requires >=2 normal training images")
+            mu=s/n
+            cov=(q-n*mu[:,:,None]*mu[:,None,:])/(n-1)
+            cov+=.01*torch.eye(cov.shape[-1],device=self.device,dtype=cov.dtype)
+            self.mu=mu.float()
+            self.chol=torch.linalg.cholesky(cov).float()
     @torch.no_grad()
-    def maps(self,rows):
+    def maps(self,rows,desc=None):
         out=[]
-        for start in range(0,len(rows),self.args.batch):
-            x=[padim_input(r) for r in rows[start:start+self.args.batch]]
-            f,(top,left,h,w)=self.features(x)
-            d=(f-self.mu).unsqueeze(-1)
-            z=torch.linalg.solve_triangular(self.chol,d,upper=False)
-            score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
-            score=restore_padim_map(score,(top,left,h,w),x[0].shape[-2:],self.args.padim_size,self.upsample_factor)
-            out.extend(ndimage.gaussian_filter(a, self.args.padim_smooth) for a in score[:,0].cpu().numpy())
+        with stage_progress(desc,len(rows),unit="img") as bar:
+            for start in range(0,len(rows),self.args.batch):
+                x=[padim_input(r) for r in rows[start:start+self.args.batch]]
+                f,(top,left,h,w)=self.features(x)
+                d=(f-self.mu).unsqueeze(-1)
+                z=torch.linalg.solve_triangular(self.chol,d,upper=False)
+                score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
+                score=restore_padim_map(score,(top,left,h,w),x[0].shape[-2:],self.args.padim_size,self.upsample_factor)
+                out.extend(ndimage.gaussian_filter(a, self.args.padim_smooth) for a in score[:,0].cpu().numpy())
+                bar.update(len(x))
         return np.asarray(out)
 
 class SkipExperiment(Exception):
     pass
 
 def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_scale=4,
-              collect_comparison=False):
+              collect_comparison=False, desc=None):
     dest=out/split
     dest.mkdir(exist_ok=True)
     scores, normalized, pred_labels, _=post_process(maps,calibration)
@@ -649,7 +655,7 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_sca
         if split != "test":
             raise ValueError("Paired comparison evidence is test-only")
         from comparison_metrics import sample_evidence, write_evidence
-    with (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
+    with stage_progress(desc,len(rows),unit="img") as bar, (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
         writer=csv.writer(f)
         writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer"])
         for r,m,norm,score,flag in zip(rows,maps,normalized,scores,pred_labels):
@@ -661,6 +667,7 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_sca
                        metadata=panel_metadata_lines(r, flag, score), scale=panel_scale)
             if collect_comparison:
                 evidence.append(sample_evidence(r, norm, flag, NORMALIZED_THRESHOLD))
+            bar.update(1)
     if collect_comparison:
         write_evidence(out/"comparison_stats.json", evidence)
 
@@ -712,13 +719,16 @@ def run_protocol(parts,args,device,out):
     (out/"split_audit.json").write_text(json.dumps({s:[{k:r[k] for k in ("id","image","label","equipment","lot","wafer")} for r in rr] for s,rr in parts.items()},indent=2),encoding="utf-8")
     results=[]
     log_dataset(parts)
+    console_info("[Data] train=%d | validation=%d | test=%d",
+                 len(parts["train"]),len(parts["val"]),len(parts["test"]))
     protocol_start=time.perf_counter()
     for exp_num,exp in enumerate(args.experiments,1):
         start=time.perf_counter()
         seed_all(args.seed)
         dest=out/exp
         dest.mkdir()
-        LOG.info("[Experiment %d/%d] %s / %s START", exp_num,len(args.experiments),out.name,exp)
+        console_info("[Experiment %d/%d] %s / %s", exp_num,len(args.experiments),out.name,exp)
+        label=exp.split("_",1)[0].upper()
         if device.type=="cuda": torch.cuda.reset_peak_memory_stats(device)
         try:
             if exp==EXPS[0] or getattr(args,"padim_suite",False):
@@ -727,7 +737,7 @@ def run_protocol(parts,args,device,out):
                 if getattr(args,"padim_suite",False):
                     from padim_backbone import adapt_backbone
                     adapt_backbone(model.net,exp,parts,args,device,dest)
-                model.fit([r for r in parts["train"] if r["label"]==0])
+                model.fit([r for r in parts["train"] if r["label"]==0],desc=f"{label} Gaussian fit")
                 checkpoint=dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
                                 size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
                 predict=model.maps
@@ -735,7 +745,7 @@ def run_protocol(parts,args,device,out):
                 predict=train_cnn(exp,parts,args,device,dest)
                 checkpoint=torch.load(dest/"model.pt",map_location="cpu",weights_only=True)
             LOG.info("[Final validation] images=%d",len(parts["val"]))
-            vm=predict(parts["val"])
+            vm=predict(parts["val"],desc=f"{label} validation")
             if not np.isfinite(vm).all():
                 raise ValueError("Nonfinite validation predictions")
             calibration=calibrate_post_processor(parts["val"],vm)
@@ -747,15 +757,20 @@ def run_protocol(parts,args,device,out):
                      calibration["image_threshold"],calibration["image_min"],calibration["image_max"],
                      calibration["pixel_threshold"],calibration["pixel_min"],calibration["pixel_max"])
             LOG.info("[Test] images=%d normalized threshold=%.6g (fixed from validation)",len(parts["test"]),th)
-            tm=predict(parts["test"])
+            tm=predict(parts["test"],desc=f"{label} test")
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
-            val,test=metrics(parts["val"],vm,th,"val",calibration),metrics(parts["test"],tm,th,"test",calibration)
+            with stage_progress(f"{label} metrics",2,unit="split") as bar:
+                val=metrics(parts["val"],vm,th,"val",calibration)
+                bar.update(1)
+                test=metrics(parts["test"],tm,th,"test",calibration)
+                bar.update(1)
             LOG.info("[Save] val/test 3-panel PNGs and CSV%s", " + diagnostic NPY maps" if args.save_raw_maps else "")
             save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps,
-                      panel_scale=args.panel_scale)
+                      panel_scale=args.panel_scale,desc=f"{label} save val")
             save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps,
-                      panel_scale=args.panel_scale, collect_comparison=getattr(args,"padim_suite",False))
+                      panel_scale=args.panel_scale, collect_comparison=getattr(args,"padim_suite",False),
+                      desc=f"{label} save test")
             result=dict(experiment=exp,status="ok",threshold=th,post_processor=calibration,val=val,test=test)
             if getattr(args,"padim_suite",False):
                 from padim_backbone import operating_points
@@ -784,6 +799,12 @@ def run_protocol(parts,args,device,out):
             LOG.info("[Final Test] %s",metric_line(result["test"],result["threshold"]))
             LOG.info("[Standard metrics] val image AUROC=%s pixel AUROC=%s | test image F1=%s pixel AUPRO@0.30=%s pixel AUROC=%s",
                      val["image_auroc"],val["pixel_auroc"],test["image_f1"],test["pixel_aupro"],test["pixel_auroc"])
+            console_info("  %s DONE (%s) | Val AUROC image/pixel=%s/%s | Test F1=%s AUPRO=%s pixel AUROC=%s",
+                         label,elapsed(result["seconds"]),number(val["image_auroc"]),number(val["pixel_auroc"]),
+                         number(test["image_f1"]),number(test["pixel_aupro"]),number(test["pixel_auroc"]))
+            console_info("  Test FPR=%s | Recall=%s | 1px=%s | 2-4px=%s | worst FPR=%s",
+                         pct(test["fpr"]),pct(test["recall"]),pct(test["regions"]["1px"]["recall"]),
+                         pct(test["regions"]["2-4px"]["recall"]),pct(test["worst_equipment_fpr"]))
         else:
             LOG.warning("[%s] %s: %s",result["status"].upper(),exp,result["error"])
         dt=time.perf_counter()-protocol_start
@@ -791,6 +812,9 @@ def run_protocol(parts,args,device,out):
                  exp_num,len(args.experiments),exp,result["status"],elapsed(result["seconds"]),
                  elapsed(dt/exp_num*(len(args.experiments)-exp_num)))
         if device.type=="cuda": torch.cuda.empty_cache()
+    valid=[r for r in results if r["status"]=="ok"]
+    selected=min(valid,key=lambda r:rank_key(r["val"],args))["experiment"] if valid else "none"
+    console_info("[Selected by validation] %s / %s",out.name,selected)
     return results
 
 def main(padim_suite=False):
@@ -801,7 +825,10 @@ def main(padim_suite=False):
     p.add_argument("--manifest",required=True)
     p.add_argument("--out",required=True)
     p.add_argument("--epochs",type=int,default=10 if padim_suite else 30)
-    p.add_argument("--log-every",type=int,default=50,help="Batch progress interval; 0 disables batch logs (epoch logs remain)")
+    p.add_argument("--log-every",type=int,default=50,help="Detailed run.log batch interval; 0 disables batch log entries, not progress bars")
+    p.add_argument("--progress",choices=["auto","on","off"],default="auto",
+                   help="auto: tqdm on interactive terminals; on: force bars; off: compact text")
+    p.add_argument("--verbose",action="store_true",help="Show detailed run.log messages in the console as well")
     p.add_argument("--batch",type=int,default=8)
     p.add_argument("--min-steps",type=int,default=20)
     p.add_argument("--lr",type=float,default=1e-3)
@@ -849,8 +876,8 @@ def main(padim_suite=False):
         p.error("--panel-scale must be an integer from 1 to 16")
     root=Path(args.out)
     root.mkdir(parents=True,exist_ok=False)
-    setup_logging(root)
-    LOG.info("[Dataset] loading and auditing manifest")
+    setup_logging(root,progress_mode=args.progress,verbose=args.verbose)
+    console_info("[Dataset] loading and auditing manifest")
     try:
         rows=load_manifest(args.manifest)
     except Exception:
@@ -866,13 +893,16 @@ def main(padim_suite=False):
     LOG.info("[Device] %s | %s",torch.cuda.get_device_name(device) if device.type=="cuda" else "CPU",gpu_memory(device))
     LOG.info("[Config] epochs=%d batch=%d lr=%g seed=%d recall=%s region_recall=%s",
              args.epochs,args.batch,args.lr,args.seed,pct(args.recall),pct(args.region_recall))
+    console_info("[Run] %s | %s | native=%sx%s | input=%sx%s | epochs=%d batch=%d",
+                 "P0-P5" if padim_suite else "Exp0-7",device,
+                 *args.native_shape,*args.padim_input_shape,args.epochs,args.batch)
     protocols=[]
     if args.protocol in ("pooled","both"): protocols.append(("pooled",None))
     if args.protocol in ("leave-one-equipment-out","both"):
         protocols += [(f"holdout_{i:02d}",eq) for i,eq in enumerate(sorted({r["equipment"] for r in rows}),1)]
     index=[]
     for proto_num,(name,eq) in enumerate(protocols,1):
-        LOG.info("[Protocol %d/%d] %s heldout_equipment=%s",proto_num,len(protocols),name,eq or "none")
+        console_info("[Protocol %d/%d] %s heldout_equipment=%s",proto_num,len(protocols),name,eq or "none")
         try:
             parts=split_rows(rows,eq)
         except ValueError as e:
@@ -886,11 +916,15 @@ def main(padim_suite=False):
     from build_report import build_report
     if args.padim_suite:
         from build_comparison_report import build_comparison_report
-        build_comparison_report(root,index)
-        LOG.info("PaDiM paired comparison: %s",root/"comparison.html")
-    build_report(root,index)
-    LOG.info("Report: %s",root/"index.html")
-    LOG.info("Log: %s",root/"run.log")
+        with stage_progress("Build comparison report",1,unit="report") as bar:
+            build_comparison_report(root,index)
+            bar.update(1)
+        console_info("PaDiM paired comparison: %s",root/"comparison.html")
+    with stage_progress("Build experiment report",1,unit="report") as bar:
+        build_report(root,index)
+        bar.update(1)
+    console_info("Report: %s",root/"index.html")
+    console_info("Log: %s",root/"run.log")
     if any(r["status"]!="ok" for r in index):
         raise SystemExit(2)
 
