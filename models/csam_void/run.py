@@ -23,6 +23,7 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 H, W = 61, 81
 PADIM_BACKBONE = "resnet18.a1_in1k"
+PADIM_MAP_RESTORE = "bilinear_input_then_native"
 NORMALIZED_THRESHOLD = .5
 EXPS = ["exp0_padim", "exp1_cnn", "exp2_normals", "exp3_hard_negative",
         "exp4_copy_paste", "exp5_domain_aug", "exp6_mixstyle", "exp7_semi"]
@@ -568,14 +569,23 @@ def create_padim_backbone(weights=None, *, pretrained=True):
     return timm.create_model(PADIM_BACKBONE, pretrained=pretrained and not weights, checkpoint_path=str(weights or ""))
 
 def restore_padim_map(score,crop,native,size=224,upsample_factor=None):
-    if upsample_factor is not None:
-        # No padding; avoid a redundant upsample/downsample that blurs tiny peaks.
-        if tuple(score.shape[-2:])==tuple(native):
-            return score
-        return F.interpolate(score,size=native,mode="bilinear",align_corners=False)
+    """Match the original PaDiM anomaly-map path: input grid, then native grid."""
     top,left,h,w=crop
-    score=F.interpolate(score,size=(size,size),mode="bilinear",align_corners=False)
-    return F.interpolate(score[:,:,top:top+h,left:left+w],size=native,mode="bilinear",align_corners=False)
+    input_shape=(h,w) if upsample_factor is not None else (size,size)
+    # Even when the distance grid already equals the native image, restore the
+    # model input resolution first, as anomalib's map generator does.
+    score=F.interpolate(score,size=input_shape,mode="bilinear",align_corners=False)
+    if upsample_factor is None:
+        score=score[:,:,top:top+h,left:left+w]
+    return F.interpolate(score,size=native,mode="bilinear",align_corners=False)
+
+def restore_head_logits(logits,crop,native,size=224,upsample_factor=None):
+    """Keep the adaptation head's existing native supervision geometry."""
+    if upsample_factor is not None:
+        if tuple(logits.shape[-2:])==tuple(native):
+            return logits
+        return F.interpolate(logits,size=native,mode="bilinear",align_corners=False)
+    return restore_padim_map(logits,crop,native,size,upsample_factor)
 
 class Padim:
     """Independent ResNet18 PaDiM-style baseline, not the user's deployed checkpoint."""
@@ -739,7 +749,7 @@ def run_protocol(parts,args,device,out):
                     adapt_backbone(model.net,exp,parts,args,device,dest)
                 model.fit([r for r in parts["train"] if r["label"]==0],desc=f"{label} Gaussian fit")
                 checkpoint=dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
+                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,map_restore=PADIM_MAP_RESTORE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
                 predict=model.maps
             else:
                 predict=train_cnn(exp,parts,args,device,dest)
@@ -885,10 +895,11 @@ def main(padim_suite=False):
         raise
     args.native_shape=list(rows[0]["x"].shape)
     args.padim_backbone=PADIM_BACKBONE
+    args.padim_map_restore=PADIM_MAP_RESTORE
     LOG.info("Native image shape (H,W): %s",tuple(args.native_shape))
     input_shape=tuple(v*args.upsample_factor for v in args.native_shape) if args.upsample_factor is not None else (args.padim_size,)*2
     args.padim_input_shape=list(input_shape)
-    LOG.info("[PaDiM config] input=%s factor=%s depth=%d n_features=%d padding=%s",input_shape,args.upsample_factor,args.max_layer_depth,args.padim_dim,args.upsample_factor is None)
+    LOG.info("[PaDiM config] input=%s factor=%s depth=%d n_features=%d padding=%s map_restore=%s",input_shape,args.upsample_factor,args.max_layer_depth,args.padim_dim,args.upsample_factor is None,PADIM_MAP_RESTORE)
     device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
     LOG.info("[Device] %s | %s",torch.cuda.get_device_name(device) if device.type=="cuda" else "CPU",gpu_memory(device))
     LOG.info("[Config] epochs=%d batch=%d lr=%g seed=%d recall=%s region_recall=%s",

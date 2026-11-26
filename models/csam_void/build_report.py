@@ -344,7 +344,8 @@ def build_report(root,index=None):
             section.append(f"<p>PaDiM input (H,W): {esc(config['padim_input_shape'])}; "
                            f"upsample factor: {esc(config.get('upsample_factor') or 'square letterbox')}; "
                            f"max layer depth: {esc(config.get('max_layer_depth'))}; "
-                           f"n_features: {esc(config.get('padim_dim'))}.</p>")
+                           f"n_features: {esc(config.get('padim_dim'))}; "
+                           f"anomaly map restoration: {esc(config.get('padim_map_restore','not recorded'))}.</p>")
         if (directory/"report.html").is_file():
             section.append(f"<p><a href='{quote(name)}/report.html'>Optional original detailed report</a></p>")
         main_rows=[]; detail_rows=[]; region_rows=[]

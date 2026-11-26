@@ -42,10 +42,11 @@ d = sqrt((f - μ)^T Σ^-1 (f - μ))
 | Feature layers | `max_layer_depth=2` (ResNet18 layer1, layer2) |
 | Feature channels | `n_features=40` (192개 중 seed로 고정된 동일 index 선택) |
 | Score smoothing | `padim_smooth=0` (Gaussian blur 미적용) |
+| Anomaly map 복원 | Feature grid → 전처리 input grid → native grid, 두 단계 모두 bilinear (`align_corners=False`) |
 | Seed / batch | 42 / 8 |
 | Gaussian fit | 확인된 정상 train 이미지 전용, 최소 2장 |
 
-예: 원본 (H,W)=(81,61) → (324,244) → layer1 (64,81,61), layer2 (128,41,31) → layer2를 layer1 위치에 nearest alignment → 192 channels 중 40개 선택 → 위치별 Gaussian. 기본 설정의 feature grid는 이미 원본 해상도이므로 불필요한 확대/축소 없이 anomaly map을 얻는다.
+예: 원본 (H,W)=(81,61) → (324,244) → layer1 (64,81,61), layer2 (128,41,31) → layer2를 layer1 위치에 nearest alignment → 192 channels 중 40개 선택 → 위치별 Gaussian. Mahalanobis distance map (81,61)은 기존 프로젝트에서 사용하는 방식에 맞춰 모델 입력 크기 (324,244)로 bilinear 확대한 뒤 (81,61)로 bilinear 축소한다. 기본 Gaussian blur는 0이며, 최종 native map을 평가·저장에 사용한다. 임시 backbone 학습 head의 native logit 복원은 기존대로 유지한다. 이전 direct-map 결과와는 복원 방식이 달라 새 calibration/evaluation으로 비교해야 한다.
 
 가중치 파일은 [공식 timm 다운로드](https://github.com/huggingface/pytorch-image-models/releases/download/v0.1-rsb-weights/resnet18_a1_0-d63eafa0.pth), [공식 모델 정보](https://huggingface.co/timm/resnet18.a1_in1k)를 참고한다. torchvision ResNet18 checkpoint와 구조가 유사해도 학습된 weight는 다르다. 이 연구용 구현이 기존 anomalib 배포 모델과 수치까지 완전히 같은 것은 아니다.
 

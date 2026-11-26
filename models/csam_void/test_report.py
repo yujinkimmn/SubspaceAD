@@ -72,9 +72,12 @@ class TestStandaloneReport(unittest.TestCase):
             ]
             (p/"results.json").write_text(json.dumps(results))
             (p/"selected.json").write_text(json.dumps({"selected_by_validation":"p1_classification"}))
+            (p/"config.json").write_text(json.dumps({"padim_input_shape":[244,324],"upsample_factor":4,
+                "max_layer_depth":2,"padim_dim":40,"padim_map_restore":"bilinear_input_then_native"}))
             s=build_report(root).read_text(encoding="utf-8")
             self.assertIn("id='padim-guide'",s)
             self.assertIn("P0–P5: 무엇이 다른가?",s)
+            self.assertIn("anomaly map restoration: bilinear_input_then_native",s)
             self.assertIn("실험별 학습 효과 비교 (validation)",s)
             self.assertIn("P0 → P1",s)
             self.assertIn("P1 → P2",s)

@@ -12,7 +12,7 @@ from scipy import ndimage
 from sklearn.metrics import roc_auc_score
 from csam_progress import stage_progress, epoch_note
 from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
-                 padim_input, padim_preprocess, restore_padim_map)
+                 padim_input, padim_preprocess, restore_head_logits)
 
 PEXPS = ["p0_pretrained", "p1_classification", "p2_classification_mixstyle",
          "p3_consistency", "p4_consistency_mixstyle", "p5_pixel_mixstyle"]
@@ -56,7 +56,7 @@ class LocalHead(nn.Module):
     def forward(self, features, crop, size, native, upsample_factor=None):
         a=features[0]
         z=torch.cat([a]+[F.interpolate(v,size=a.shape[-2:],mode="nearest") for v in features[1:]],1)
-        return restore_padim_map(self.head(z),crop,native,size,upsample_factor)
+        return restore_head_logits(self.head(z),crop,native,size,upsample_factor)
 
 def consistency(student,teacher):
     # Relative MSE at all selected PaDiM layers. Fixed teacher prevents a moving-target collapse.

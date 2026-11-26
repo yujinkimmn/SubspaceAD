@@ -28,7 +28,8 @@ class TestPadimBackbone(unittest.TestCase):
             self.assertEqual((t,l),((64-h)//2,(64-w)//2))
 
     def test_native_factor_four_and_depth_two(self):
-        from run import restore_padim_map
+        from run import restore_padim_map, restore_head_logits
+        from torch.nn.functional import interpolate
         from padim_backbone import LocalHead
         net=create_padim_backbone(pretrained=False).eval()
         for shape in ((81,61),(61,81)):
@@ -45,7 +46,29 @@ class TestPadimBackbone(unittest.TestCase):
                 self.assertEqual(tuple(logits.shape),(1,1,*shape))
             peak=torch.zeros(1,1,*shape)
             peak[:,:,5,5]=1
-            self.assertTrue(torch.equal(peak,restore_padim_map(peak,crop,shape,None,4)))
+            # The final anomaly score passes through the actual 4x input grid.
+            input_map=interpolate(peak,size=z.shape[-2:],mode="bilinear",align_corners=False)
+            expected=interpolate(input_map,size=shape,mode="bilinear",align_corners=False)
+            actual=restore_padim_map(peak,crop,shape,None,4)
+            torch.testing.assert_close(actual,expected)
+            self.assertEqual(tuple(actual.shape),(1,1,*shape))
+            self.assertAlmostEqual(float(actual[0,0,5,5]),.765625)
+            self.assertGreater(float(actual[0,0,5,6]),0.)
+            self.assertFalse(torch.equal(peak,actual))
+            # The temporary supervision head does not receive this extra spatial smoothing.
+            self.assertTrue(torch.equal(peak,restore_head_logits(peak,crop,shape,None,4)))
+
+    def test_anomaly_map_letterbox_restoration_unchanged(self):
+        from run import restore_padim_map
+        from torch.nn.functional import interpolate
+        shape=(61,81)
+        _,crop=preprocess(torch.ones(1,1,*shape),64)
+        top,left,h,w=crop
+        score=torch.arange(16*16,dtype=torch.float32).reshape(1,1,16,16)
+        enlarged=interpolate(score,size=(64,64),mode="bilinear",align_corners=False)
+        expected=interpolate(enlarged[:,:,top:top+h,left:left+w],size=shape,
+                             mode="bilinear",align_corners=False)
+        torch.testing.assert_close(restore_padim_map(score,crop,shape,64,None),expected)
 
     def test_transform_matches_original_dtype_resize_order(self):
         from torchvision.transforms import v2

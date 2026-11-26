@@ -19,6 +19,7 @@ def main():
     assert conf["upsample_factor"]==4 and conf["padim_size"] is None
     assert conf["max_layer_depth"]==2 and conf["padim_dim"]==40
     assert conf["padim_input_shape"]==[v*4 for v in native]
+    assert conf["padim_map_restore"]=="bilinear_input_then_native"
     results=json.loads((root/"results.json").read_text())
     assert len(results)==6 and all(r["status"]=="ok" for r in results),results
     ref=torch.load(root/"p0_pretrained"/"model.pt",map_location="cpu",weights_only=True)
@@ -28,6 +29,7 @@ def main():
         model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
         assert model["upsample_factor"]==4 and model["max_layer_depth"]==2 and model["n_features"]==40
         assert model["backbone_name"]=="resnet18.a1_in1k"
+        assert model["map_restore"]=="bilinear_input_then_native"
         assert model["post_processor"]==r["post_processor"]
         assert tuple(model["feature_shape"])==native
         assert tuple(model["mu"].shape)==(native[0]*native[1],40)
