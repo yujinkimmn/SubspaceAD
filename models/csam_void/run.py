@@ -442,6 +442,32 @@ def rank_key(m,args):
     return (deficit, m["worst_equipment_fpr"] if m["worst_equipment_fpr"] is not None else 1,
             m["fpr"], -(m["dice"] or 0))
 
+def padim_preprocess(x,size=224,upsample_factor=None):
+    native_h,native_w=x.shape[-2:]
+    if upsample_factor is not None:
+        h,w=native_h*upsample_factor,native_w*upsample_factor
+        top,left=0,0
+        x=F.interpolate(x,size=(h,w),mode="bilinear",align_corners=False)
+    else:
+        scale=size/max(native_h,native_w)
+        h,w=round(native_h*scale),round(native_w*scale)
+        x=F.interpolate(x,size=(h,w),mode="bilinear",align_corners=False)
+        top,left=(size-h)//2,(size-w)//2
+        x=F.pad(x,(left,size-w-left,top,size-h-top),mode="replicate")
+    x=x.repeat(1,3,1,1)
+    x=(x-x.new_tensor([.485,.456,.406])[None,:,None,None])/x.new_tensor([.229,.224,.225])[None,:,None,None]
+    return x,(top,left,h,w)
+
+def restore_padim_map(score,crop,native,size=224,upsample_factor=None):
+    if upsample_factor is not None:
+        # No padding; avoid a redundant upsample/downsample that blurs tiny peaks.
+        if tuple(score.shape[-2:])==tuple(native):
+            return score
+        return F.interpolate(score,size=native,mode="bilinear",align_corners=False)
+    top,left,h,w=crop
+    score=F.interpolate(score,size=(size,size),mode="bilinear",align_corners=False)
+    return F.interpolate(score[:,:,top:top+h,left:left+w],size=native,mode="bilinear",align_corners=False)
+
 class Padim:
     """Independent ResNet18 PaDiM-style baseline, not the user's deployed checkpoint."""
     def __init__(self,args,device):
@@ -451,24 +477,23 @@ class Padim:
         if args.padim_weights:
             self.net.load_state_dict(torch.load(args.padim_weights,map_location="cpu",weights_only=True))
         self.net.eval().to(device)
-        self.channels = torch.randperm(448,generator=torch.Generator().manual_seed(args.seed))[:args.padim_dim].to(device)
+        self.depth=getattr(args,"max_layer_depth",3)
+        self.upsample_factor=getattr(args,"upsample_factor",None)
+        total=sum((64,128,256)[:self.depth])
+        if not 1<=args.padim_dim<=total:
+            raise ValueError(f"padim_dim must be <= {total} for depth {self.depth}")
+        self.channels = torch.randperm(total,generator=torch.Generator().manual_seed(args.seed))[:args.padim_dim].to(device)
     @torch.no_grad()
     def features(self,x):
-        native_h,native_w=x.shape[-2:]
-        size=self.args.padim_size
-        scale=size/max(native_h,native_w)
-        h,w=round(native_h*scale),round(native_w*scale)
-        x=F.interpolate(x.to(self.device),size=(h,w),mode="bilinear",align_corners=False)
-        top,left=(size-h)//2,(size-w)//2
-        x=F.pad(x,(left,size-w-left,top,size-h-top),mode="replicate").repeat(1,3,1,1)
-        x=(x-x.new_tensor([.485,.456,.406])[None,:,None,None])/x.new_tensor([.229,.224,.225])[None,:,None,None]
+        x,crop=padim_preprocess(x.to(self.device),self.args.padim_size,self.upsample_factor)
         n=self.net
         a=n.layer1(n.maxpool(n.relu(n.bn1(n.conv1(x)))))
-        b=n.layer2(a); c=n.layer3(b)
-        f=torch.cat([a,F.interpolate(b,size=a.shape[-2:],mode="nearest"),
-                     F.interpolate(c,size=a.shape[-2:],mode="nearest")],1)[:,self.channels]
+        feats=[a]
+        for i in range(2,self.depth+1):
+            feats.append(getattr(n,f"layer{i}")(feats[-1]))
+        f=torch.cat([a]+[F.interpolate(v,size=a.shape[-2:],mode="nearest") for v in feats[1:]],1)[:,self.channels]
         self.shape=f.shape[-2:]
-        return f.flatten(2).transpose(1,2), (top,left,h,w)
+        return f.flatten(2).transpose(1,2),crop
     @torch.no_grad()
     def fit(self,rows):
         # Streaming first and second moments, avoiding all N feature maps in RAM.
@@ -497,8 +522,7 @@ class Padim:
             d=(f-self.mu).unsqueeze(-1)
             z=torch.linalg.solve_triangular(self.chol,d,upper=False)
             score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
-            score=F.interpolate(score,size=(self.args.padim_size,)*2,mode="bilinear",align_corners=False)
-            score=F.interpolate(score[:,:,top:top+h,left:left+w],size=x.shape[-2:],mode="bilinear",align_corners=False)
+            score=restore_padim_map(score,(top,left,h,w),x.shape[-2:],self.args.padim_size,self.upsample_factor)
             out.extend(ndimage.gaussian_filter(a, self.args.padim_smooth) for a in score[:,0].cpu().numpy())
         return np.asarray(out)
 
@@ -580,14 +604,14 @@ def run_protocol(parts,args,device,out):
         if device.type=="cuda": torch.cuda.reset_peak_memory_stats(device)
         try:
             if exp==EXPS[0] or getattr(args,"padim_suite",False):
-                LOG.info("[PaDiM] feature size=%d channels=%d normal-only fit",args.padim_size,args.padim_dim)
+                LOG.info("[PaDiM] square_size=%s upsample_factor=%s depth=%d channels=%d normal-only fit",args.padim_size,args.upsample_factor,args.max_layer_depth,args.padim_dim)
                 model=Padim(args,device)
                 if getattr(args,"padim_suite",False):
                     from padim_backbone import adapt_backbone
                     adapt_backbone(model.net,exp,parts,args,device,dest)
                 model.fit([r for r in parts["train"] if r["label"]==0])
                 torch.save(dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,smooth=args.padim_smooth,native_shape=args.native_shape,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
+                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
                 predict=model.maps
             else:
                 predict=train_cnn(exp,parts,args,device,dest)
@@ -655,8 +679,11 @@ def main(padim_suite=False):
     p.add_argument("--recall",type=float,default=.95)
     p.add_argument("--region-recall",type=float,default=.90)
     p.add_argument("--device",default="auto")
-    p.add_argument("--padim-size",type=int,default=224)
-    p.add_argument("--padim-dim",type=int,default=100)
+    geometry=p.add_mutually_exclusive_group()
+    geometry.add_argument("--padim-size",type=int,default=None,help="Square letterbox size (legacy mode; overrides suite default factor)")
+    geometry.add_argument("--upsample-factor","--upsample_factor",type=int,default=None,help="Integer native H/W scale, no padding")
+    p.add_argument("--max-layer-depth","--max_layer_depth",type=int,choices=[1,2,3],default=2 if padim_suite else 3)
+    p.add_argument("--padim-dim","--n-features","--n_features",dest="padim_dim",type=int,default=40 if padim_suite else 100)
     p.add_argument("--padim-smooth",type=float,default=0.)
     p.add_argument("--padim-weights",help="Local torchvision ResNet18 state_dict; otherwise downloads official ImageNet weights")
     p.add_argument("--experiments",nargs="+",choices=choices,default=choices)
@@ -670,9 +697,14 @@ def main(padim_suite=False):
     p.add_argument("--protocol",choices=["pooled","leave-one-equipment-out","both"],default="pooled")
     args=p.parse_args()
     args.padim_suite=padim_suite
+    if args.padim_size is None and args.upsample_factor is None:
+        if padim_suite: args.upsample_factor=4
+        else: args.padim_size=224
+    if args.upsample_factor is not None and args.upsample_factor<1:
+        p.error("upsample-factor must be >= 1")
     if padim_suite and not (args.backbone_lr>0 and args.head_lr>0 and 0<args.mix_prob<=1 and args.mix_alpha>0 and args.pixel_weight>0 and args.anchor_weight>0):
         p.error("Invalid backbone adaptation hyperparameters")
-    if not (0<args.recall<=1 and 0<=args.region_recall<=1 and args.epochs>0 and args.batch>1 and args.min_steps>0 and 1<=args.padim_dim<=448 and args.padim_size>=32 and args.lr>0 and args.padim_smooth>=0):
+    if not (0<args.recall<=1 and 0<=args.region_recall<=1 and args.epochs>0 and args.batch>1 and args.min_steps>0 and 1<=args.padim_dim<=sum((64,128,256)[:args.max_layer_depth]) and (args.padim_size is None or args.padim_size>=32) and args.lr>0 and args.padim_smooth>=0):
         p.error("Invalid hyperparameters")
     if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
         p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
@@ -691,6 +723,9 @@ def main(padim_suite=False):
         raise
     args.native_shape=list(rows[0]["x"].shape)
     LOG.info("Native image shape (H,W): %s",tuple(args.native_shape))
+    input_shape=tuple(v*args.upsample_factor for v in args.native_shape) if args.upsample_factor is not None else (args.padim_size,)*2
+    args.padim_input_shape=list(input_shape)
+    LOG.info("[PaDiM config] input=%s factor=%s depth=%d n_features=%d padding=%s",input_shape,args.upsample_factor,args.max_layer_depth,args.padim_dim,args.upsample_factor is None)
     device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
     LOG.info("[Device] %s | %s",torch.cuda.get_device_name(device) if device.type=="cuda" else "CPU",gpu_memory(device))
     LOG.info("[Config] epochs=%d batch=%d lr=%g seed=%d recall=%s region_recall=%s",
