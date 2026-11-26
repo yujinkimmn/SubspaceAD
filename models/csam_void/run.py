@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -287,7 +287,41 @@ def threshold_for(rows, maps, recall, region_recall=.90):
             thresholds.append(vals[math.ceil(region_recall * len(vals))-1])
     return min(thresholds)
 
-def summarize(rows, maps, threshold):
+def pixel_metrics(rows, maps, include_aupro=False):
+    """Dataset-level pixel AUROC and exact region-balanced partial ROC area."""
+    target = np.stack([r["y"] > 0 for r in rows])
+    scores = np.asarray(maps)
+    if target.shape != scores.shape:
+        raise ValueError("Pixel metric requires aligned native anomaly maps and masks")
+    y = target.ravel()
+    z = scores.ravel()
+    result = {"pixel_auroc": float(roc_auc_score(y, z)) if y.any() and not y.all() else None}
+    if not include_aupro:
+        return result
+    result["pixel_aupro"] = None
+    if not y.any() or y.all():
+        return result
+    # Negative pixels have equal weight; each 8-connected positive region
+    # has total weight 1, independently of its area. Weighted ROC TPR is PRO.
+    weights = np.ones(target.shape, dtype=np.float64)
+    for i, mask in enumerate(target):
+        labels, _ = ndimage.label(mask, structure=np.ones((3,3)))
+        counts = np.bincount(labels.ravel())
+        weights[i][mask] = 1.0 / counts[labels[mask]]
+    fpr, pro, _ = roc_curve(y, z, sample_weight=weights.ravel(), drop_intermediate=False)
+    limit = .30
+    # Include vertical segments and linearly interpolate at the integration limit.
+    end = np.searchsorted(fpr, limit, side="right")
+    xf, yf = fpr[:end], pro[:end]
+    if xf[-1] < limit:
+        xf = np.append(xf, limit)
+        yf = np.append(yf, pro[end-1] + (pro[end]-pro[end-1]) *
+                       (limit-fpr[end-1]) / (fpr[end]-fpr[end-1]))
+    result["pixel_aupro"] = float(np.clip(np.sum(np.diff(xf)*(yf[1:]+yf[:-1])*.5)/limit, 0, 1))
+    return result
+
+
+def summarize(rows, maps, threshold, evaluation_split=None):
     tp = fp = tn = fn = inter = union = predpix = truepix = 0
     region = {k:[0,0] for k in ("1px", "2-4px", "5+px")}
     false_regions = 0
@@ -312,18 +346,25 @@ def summarize(rows, maps, threshold):
             region[bucket][1] += 1
             region[bucket][0] += int((obj & pred).any())
     div = lambda a,b: float(a/b) if b else None
-    return dict(tp=tp, fp=fp, tn=tn, fn=fn, recall=div(tp,tp+fn), fpr=div(fp,fp+tn),
+    result = dict(tp=tp, fp=fp, tn=tn, fn=fn, recall=div(tp,tp+fn), fpr=div(fp,fp+tn),
                 underkill=div(fn,tp+fn), dice=div(2*inter,predpix+truepix), iou=div(inter,union),
                 auroc=float(roc_auc_score(labels,scores)) if len(set(labels))==2 else None,
                 fp_regions_per_normal=div(false_regions,fp+tn),
                 regions={k:dict(hit=v[0], count=v[1], recall=div(*v)) for k,v in region.items()})
 
-def metrics(rows, maps, threshold):
-    overall = summarize(rows,maps,threshold)
+    if evaluation_split is not None:
+        result["image_auroc"] = result["auroc"]
+        result.update(pixel_metrics(rows, maps, include_aupro=evaluation_split=="test"))
+        if evaluation_split=="test":
+            result["image_f1"] = div(2*tp, 2*tp+fp+fn) or 0.0
+    return result
+
+def metrics(rows, maps, threshold, evaluation_split=None):
+    overall = summarize(rows,maps,threshold,evaluation_split)
     by = {}
     for eq in sorted({r["equipment"] for r in rows}):
         idx = [i for i,r in enumerate(rows) if r["equipment"]==eq]
-        by[eq] = summarize([rows[i] for i in idx], maps[idx], threshold)
+        by[eq] = summarize([rows[i] for i in idx], maps[idx], threshold,evaluation_split)
     overall["by_equipment"] = by
     overall["worst_equipment_fpr"] = max((v["fpr"] for v in by.values() if v["fpr"] is not None),default=None)
     return overall
@@ -587,7 +628,7 @@ def report(results,out,args):
     (out/"results.json").write_text(json.dumps(results,indent=2,allow_nan=False),encoding="utf-8")
     ok=[r for r in results if r["status"]=="ok"]
     best=min(ok,key=lambda r:rank_key(r["val"],args))["experiment"] if ok else None
-    fields=["experiment","status","threshold","seconds","val_fpr","val_recall","val_dice","test_fpr",
+    fields=["experiment","status","threshold","seconds","val_image_auroc","val_pixel_auroc","test_image_f1","test_pixel_aupro","test_pixel_auroc","val_fpr","val_recall","val_dice","test_fpr",
             "test_recall","test_dice","test_iou","test_worst_fpr","test_1px","test_2-4px","test_5+px","error"]
     flat=[]
     for r in results:
@@ -596,6 +637,8 @@ def report(results,out,args):
             for s in ("val","test"):
                 for k in ("fpr","recall","dice","iou"):
                     row[s+"_"+k]=r[s][k]
+            for split, keys in (("val", ("image_auroc","pixel_auroc")), ("test", ("image_f1","pixel_aupro","pixel_auroc"))):
+                for key in keys: row[split+"_"+key]=r[split].get(key)
             row["test_worst_fpr"]=r["test"]["worst_equipment_fpr"]
             for k in ("1px","2-4px","5+px"): row["test_"+k]=r["test"]["regions"][k]["recall"]
         flat.append(row)
@@ -657,7 +700,7 @@ def run_protocol(parts,args,device,out):
             tm=predict(parts["test"])
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
-            val,test=metrics(parts["val"],vm,th),metrics(parts["test"],tm,th)
+            val,test=metrics(parts["val"],vm,th,"val"),metrics(parts["test"],tm,th,"test")
             (dest/"threshold.json").write_text(json.dumps({"threshold":th,"source":"validation"}),encoding="utf-8")
             LOG.info("[Save] val/test maps, masks, overlays, 3-panel PNGs and CSV")
             save_eval(parts["val"],vm,th,dest,"val")
@@ -687,6 +730,8 @@ def run_protocol(parts,args,device,out):
         if result["status"]=="ok":
             LOG.info("[Final Val] %s",metric_line(result["val"],result["threshold"]))
             LOG.info("[Final Test] %s",metric_line(result["test"],result["threshold"]))
+            LOG.info("[Standard metrics] val image AUROC=%s pixel AUROC=%s | test image F1=%s pixel AUPRO@0.30=%s pixel AUROC=%s",
+                     val["image_auroc"],val["pixel_auroc"],test["image_f1"],test["pixel_aupro"],test["pixel_auroc"])
         else:
             LOG.warning("[%s] %s: %s",result["status"].upper(),exp,result["error"])
         dt=time.perf_counter()-protocol_start
