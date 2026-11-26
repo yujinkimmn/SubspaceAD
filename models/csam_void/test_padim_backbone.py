@@ -24,6 +24,27 @@ class TestPadimBackbone(unittest.TestCase):
             self.assertEqual(max(h,w),64)
             self.assertEqual((t,l),((64-h)//2,(64-w)//2))
 
+    def test_native_factor_four_and_depth_two(self):
+        from torchvision.models import resnet18
+        from run import restore_padim_map
+        from padim_backbone import LocalHead
+        net=resnet18(weights=None).eval()
+        for shape in ((81,61),(61,81)):
+            x=torch.ones(1,1,*shape)
+            z,crop=preprocess(x,None,4)
+            self.assertEqual(tuple(z.shape[-2:]),tuple(v*4 for v in shape))
+            self.assertEqual(crop,(0,0,shape[0]*4,shape[1]*4))
+            with torch.no_grad():
+                fs=layers(net,z,depth=2)
+                self.assertEqual(len(fs),2)
+                self.assertEqual(tuple(fs[0].shape),(1,64,*shape))
+                self.assertEqual(fs[1].shape[1],128)
+                logits=LocalHead(2)(fs,crop,None,shape,4)
+                self.assertEqual(tuple(logits.shape),(1,1,*shape))
+            peak=torch.zeros(1,1,*shape)
+            peak[:,:,5,5]=1
+            self.assertTrue(torch.equal(peak,restore_padim_map(peak,crop,shape,None,4)))
+
     def test_matched_sampling(self):
         rows=[dict(label=i%2,equipment="A" if i<5 else "B",id=i) for i in range(10)]
         a=list(batch_rows(rows,4,3,True,42))

@@ -201,6 +201,11 @@ def build_report(root,index=None):
         section.append(f"<p>Validation-selected model: <strong>{esc(best or 'None recorded')}</strong>. "
                        f"Validation targets: image recall {percent(config.get('recall'))}, "
                        f"small-region recall {percent(config.get('region_recall'))}.</p>")
+        if "padim_input_shape" in config:
+            section.append(f"<p>PaDiM input (H,W): {esc(config['padim_input_shape'])}; "
+                           f"upsample factor: {esc(config.get('upsample_factor') or 'square letterbox')}; "
+                           f"max layer depth: {esc(config.get('max_layer_depth'))}; "
+                           f"n_features: {esc(config.get('padim_dim'))}.</p>")
         if (directory/"report.html").is_file():
             section.append(f"<p><a href='{quote(name)}/report.html'>Optional original detailed report</a></p>")
         section.append(chart_group(results))

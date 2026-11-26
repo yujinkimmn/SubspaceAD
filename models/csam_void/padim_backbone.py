@@ -10,7 +10,8 @@ from torch import nn
 import torch.nn.functional as F
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score
-from run import LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn
+from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
+                 padim_preprocess, restore_padim_map)
 
 PEXPS = ["p0_pretrained", "p1_classification", "p2_classification_mixstyle",
          "p3_consistency", "p4_consistency_mixstyle", "p5_pixel_mixstyle"]
@@ -33,40 +34,31 @@ class CrossMix(nn.Module):
         self.applied += 1
         return (x-mu)/std*(lam*std+(1-lam)*std[perm])+lam*mu+(1-lam)*mu[perm]
 
-def preprocess(x,size):
-    h,w=x.shape[-2:]
-    scale=size/max(h,w)
-    h,w=round(h*scale),round(w*scale)
-    x=F.interpolate(x,size=(h,w),mode="bilinear",align_corners=False)
-    top,left=(size-h)//2,(size-w)//2
-    x=F.pad(x,(left,size-w-left,top,size-h-top),mode="replicate").repeat(1,3,1,1)
-    x=(x-x.new_tensor([.485,.456,.406])[None,:,None,None])/x.new_tensor([.229,.224,.225])[None,:,None,None]
-    return x,(top,left,h,w)
+def preprocess(x,size,upsample_factor=None):
+    return padim_preprocess(x,size,upsample_factor)
 
-def layers(net,x,mix=None,domains=()):
+def layers(net,x,mix=None,domains=(),depth=3):
     stem=net.maxpool(net.relu(net.bn1(net.conv1(x))))
-    if mix is not None: stem=mix(stem,domains)
-    a=net.layer1(stem)
-    b=net.layer2(mix(a,domains) if mix is not None else a)
-    c=net.layer3(mix(b,domains) if mix is not None else b)
-    # Pre-mix outputs are exactly the layers used by PaDiM at inference.
-    return a,b,c
+    features=[]
+    for i in range(1,depth+1):
+        if mix is not None:
+            stem=mix(stem,domains)
+        stem=getattr(net,f"layer{i}")(stem)
+        features.append(stem)
+    return tuple(features)
 
 class LocalHead(nn.Module):
-    def __init__(self):
+    def __init__(self,depth=3):
         super().__init__()
-        self.head=nn.Sequential(nn.Conv2d(448,64,1),nn.ReLU(),nn.Conv2d(64,1,1))
+        self.head=nn.Sequential(nn.Conv2d(sum((64,128,256)[:depth]),64,1),nn.ReLU(),nn.Conv2d(64,1,1))
 
-    def forward(self, features, crop, size, native):
-        a,b,c=features
-        z=torch.cat([a,F.interpolate(b,size=a.shape[-2:],mode="nearest"),
-                     F.interpolate(c,size=a.shape[-2:],mode="nearest")],1)
-        z=F.interpolate(self.head(z),size=(size,size),mode="bilinear",align_corners=False)
-        t,l,h,w=crop
-        return F.interpolate(z[:,:,t:t+h,l:l+w],size=native,mode="bilinear",align_corners=False)
+    def forward(self, features, crop, size, native, upsample_factor=None):
+        a=features[0]
+        z=torch.cat([a]+[F.interpolate(v,size=a.shape[-2:],mode="nearest") for v in features[1:]],1)
+        return restore_padim_map(self.head(z),crop,native,size,upsample_factor)
 
 def consistency(student,teacher):
-    # Relative MSE at all three PaDiM layers. Fixed teacher prevents a moving-target collapse.
+    # Relative MSE at all selected PaDiM layers. Fixed teacher prevents a moving-target collapse.
     return sum((s-t).square().mean()/(t.square().mean().detach()+1e-6)
                for s,t in zip(student,teacher))/len(teacher)
 
@@ -96,17 +88,17 @@ def proxy_eval(net,head,teacher,rows,args,device,supervised):
     for start in range(0,len(rows),args.batch):
         rr=rows[start:start+args.batch]
         x,y=tensors(rr,device)
-        z,crop=preprocess(x,args.padim_size)
+        z,crop=preprocess(x,args.padim_size,args.upsample_factor)
         if supervised:
-            logits=head(layers(net,z),crop,args.padim_size,x.shape[-2:])
+            logits=head(layers(net,z,depth=args.max_layer_depth),crop,args.padim_size,x.shape[-2:],args.upsample_factor)
             scores.extend(logits.flatten(1).amax(1).cpu().tolist())
             labels.extend(r["label"] for r in rr)
             pred=logits>=0
             inter+=int((pred & (y>0)).sum())
             predpix+=int(pred.sum()); truepix+=int(y.sum())
         else:
-            changed,_=preprocess((x*1.10+.03).clamp(0,1),args.padim_size)
-            losses.append((len(rr),float(consistency(layers(net,changed),layers(teacher,z)))))
+            changed,_=preprocess((x*1.10+.03).clamp(0,1),args.padim_size,args.upsample_factor)
+            losses.append((len(rr),float(consistency(layers(net,changed,depth=args.max_layer_depth),layers(teacher,z,depth=args.max_layer_depth)))))
     if supervised:
         return {"head_image_auroc":float(roc_auc_score(labels,scores)) if len(set(labels))==2 else None,
                 "head_pixel_dice_at_0.5":2*inter/(predpix+truepix) if predpix+truepix else None}
@@ -129,19 +121,20 @@ def adapt_backbone(net,exp,parts,args,device,out):
         teacher.requires_grad_(False)
     # Freeze ImageNet stem and BN running statistics/affine parameters.
     net.requires_grad_(False)
-    for layer in (net.layer1,net.layer2,net.layer3):
-        layer.requires_grad_(True)
+    for i in range(1,args.max_layer_depth+1):
+        getattr(net,f"layer{i}").requires_grad_(True)
     for module in net.modules():
         if isinstance(module,nn.BatchNorm2d):
             module.eval().requires_grad_(False)
     net.eval()  # BN fixed; eval mode does NOT disable gradients.
-    head=LocalHead().to(device) if supervised else None
+    head=LocalHead(args.max_layer_depth).to(device) if supervised else None
     mix=CrossMix(args.mix_prob,args.mix_alpha).to(device) if use_mix else None
     groups=[{"params":[p for p in net.parameters() if p.requires_grad],"lr":args.backbone_lr}]
     if head is not None: groups.append({"params":head.parameters(),"lr":args.head_lr})
     opt=torch.optim.AdamW(groups,weight_decay=1e-4)
     steps=max(args.min_steps,math.ceil(len(train)/args.batch))
-    initial={k:v.detach().cpu().clone() for k,v in net.state_dict().items() if k.startswith(("layer1.","layer2.","layer3."))}
+    prefixes=tuple(f"layer{i}." for i in range(1,args.max_layer_depth+1))
+    initial={k:v.detach().cpu().clone() for k,v in net.state_dict().items() if k.startswith(prefixes)}
     history=[]; started=time.perf_counter()
     LOG.info("[Backbone] %s supervised=%s cross_mix=%s train=%d val=%d steps=%d",
              exp,supervised,use_mix,len(train),len(val),steps)
@@ -152,19 +145,19 @@ def adapt_backbone(net,exp,parts,args,device,out):
         for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised,args.seed+epoch),1):
             x,y=tensors(rr,device)
             domains=[r["equipment"] for r in rr]
-            clean,crop=preprocess(x,args.padim_size)
+            clean,crop=preprocess(x,args.padim_size,args.upsample_factor)
             if supervised:
-                logits=head(layers(net,clean,mix,domains),crop,args.padim_size,x.shape[-2:])
+                logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,x.shape[-2:],args.upsample_factor)
                 labels=torch.tensor([r["label"] for r in rr],device=device,dtype=x.dtype)
                 task=F.binary_cross_entropy_with_logits(logits.flatten(1).amax(1),labels)
                 anchor=loss_fn(logits,y,hard=True) if idx==5 else task.new_zeros(())
                 loss=task+args.pixel_weight*anchor
             else:
                 augmented,_=tensors(rr,device,augment=True)
-                augmented,_=preprocess(augmented,args.padim_size)
-                with torch.no_grad(): target=layers(teacher,clean)
-                task=consistency(layers(net,augmented,mix,domains),target)
-                anchor=consistency(layers(net,clean),target)
+                augmented,_=preprocess(augmented,args.padim_size,args.upsample_factor)
+                with torch.no_grad(): target=layers(teacher,clean,depth=args.max_layer_depth)
+                task=consistency(layers(net,augmented,mix,domains,args.max_layer_depth),target)
+                anchor=consistency(layers(net,clean,depth=args.max_layer_depth),target)
                 loss=task+args.anchor_weight*anchor
             if not torch.isfinite(loss):
                 raise ValueError("Nonfinite backbone loss")
@@ -194,7 +187,8 @@ def adapt_backbone(net,exp,parts,args,device,out):
     net.eval().requires_grad_(False)
     torch.save({k:v.detach().cpu() for k,v in net.state_dict().items()},out/"backbone.pt")
     (out/"backbone_summary.json").write_text(json.dumps(dict(weight_max_abs_change=delta,
-        mixstyle_calls=mix.applied if mix else 0,epochs=args.epochs,final_proxy=history[-1]["val"]),indent=2),encoding="utf-8")
+        mixstyle_calls=mix.applied if mix else 0,epochs=args.epochs,max_layer_depth=args.max_layer_depth,
+        upsample_factor=args.upsample_factor,n_features=args.padim_dim,final_proxy=history[-1]["val"]),indent=2),encoding="utf-8")
     LOG.info("[Backbone] frozen; weight_delta=%.6g mix_calls=%d; Gaussian fit uses real normals, MixStyle OFF",delta,mix.applied if mix else 0)
 
 def score_samples(rows,maps):
