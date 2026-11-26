@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 import torch
-from run import VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W, save_panel
+from run import VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W, save_panel, pixel_metrics
 
 class TestCSAM(unittest.TestCase):
     def test_native_shape_and_grad(self):
@@ -58,6 +58,32 @@ class TestCSAM(unittest.TestCase):
                     b = np.asarray(image)
                 cx, cy = 12+w+12+20, top+10
                 np.testing.assert_array_equal(a[cy,cx], b[cy,cx])
+
+    def test_aligned_standard_metrics(self):
+        y = np.array([[1,0,0],[0,0,0]],dtype=np.float32)
+        rows = [dict(label=1,y=y,equipment="a"),dict(label=0,y=y*0,equipment="a")]
+        maps = np.stack([y*.9,y*0+.1])
+        val = metrics(rows,maps,.5,"val")
+        test = metrics(rows,maps,.5,"test")
+        self.assertAlmostEqual(val["image_auroc"],1)
+        self.assertAlmostEqual(val["pixel_auroc"],1)
+        self.assertNotIn("pixel_aupro",val)
+        self.assertAlmostEqual(test["image_f1"],1)
+        self.assertAlmostEqual(test["pixel_aupro"],1)
+        self.assertAlmostEqual(metrics(rows,maps,.95,"test")["image_f1"],0)
+        tied = pixel_metrics(rows,np.zeros_like(maps),True)
+        self.assertAlmostEqual(tied["pixel_auroc"],.5)
+        self.assertAlmostEqual(tied["pixel_aupro"],.15)
+        self.assertIsNone(pixel_metrics(rows[1:],maps[1:],True)["pixel_aupro"])
+
+    def test_aupro_weights_regions_equally(self):
+        # Two separate components: 1 pixel and 3 pixels.
+        # Only the small component ranks above every background pixel.
+        y = np.array([[1,0,0,0,1,1,1]],dtype=np.float32)
+        z = np.array([[[.9,.5,.5,.5,.1,.1,.1]]],dtype=np.float32)
+        result = pixel_metrics([dict(y=y)],z,True)
+        self.assertAlmostEqual(result["pixel_aupro"],.5)
+        self.assertAlmostEqual(result["pixel_auroc"],.25)
 
     def test_copy_paste(self):
         x=np.full((H,W),.3,np.float32)
