@@ -70,7 +70,8 @@ def consistency(student,teacher):
     return sum((s-t).square().mean()/(t.square().mean().detach()+1e-6)
                for s,t in zip(student,teacher))/len(teacher)
 
-def batch_rows(rows,batch,steps,supervised):
+def batch_rows(rows,batch,steps,supervised,seed):
+    rng=random.Random(seed)
     # Same class/equipment-balanced sampling policy for matched ablation pairs.
     groups={}
     for r in rows:
@@ -78,10 +79,10 @@ def batch_rows(rows,batch,steps,supervised):
         groups.setdefault(key,[]).append(r)
     keys=list(groups)
     for _ in range(steps):
-        chosen=[random.choice(groups[random.choice(keys)]) for _ in range(batch)]
+        chosen=[rng.choice(groups[rng.choice(keys)]) for _ in range(batch)]
         if len({r["equipment"] for r in chosen})==1 and len({r["equipment"] for r in rows})>1:
             other=[k for k in keys if groups[k][0]["equipment"]!=chosen[0]["equipment"]]
-            chosen[-1]=random.choice(groups[random.choice(other)])
+            chosen[-1]=rng.choice(groups[rng.choice(other)])
         yield chosen
 
 def tensors(rows,device,augment=False):
@@ -148,7 +149,7 @@ def adapt_backbone(net,exp,parts,args,device,out):
         st=time.perf_counter(); losses=[]; tasks=[]; anchors=[]
         before=mix.applied if mix else 0
         if mix is not None: mix.train()
-        for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised),1):
+        for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised,args.seed+epoch),1):
             x,y=tensors(rr,device)
             domains=[r["equipment"] for r in rr]
             clean,crop=preprocess(x,args.padim_size)
@@ -229,12 +230,12 @@ def operating_points(val_rows,vm,test_rows,tm,primary):
                 points.append(dict(kind=key+"_recall",target=q,threshold=th,val=rates(v,th),test=rates(t,th)))
     for q in (0.,.01,.05,.1,.2,.5,1.):
         a=v["normal"]; allowed=math.floor(q*len(a))
-        th=float(np.nextafter(a[len(a)-allowed-1],np.inf)) if allowed<len(a) else float(min(a[0],v["positive"][0]))
+        th=float(np.nextafter(np.float32(a[len(a)-allowed-1]),np.float32(np.inf))) if allowed<len(a) else float(min(a[0],v["positive"][0]))
         points.append(dict(kind="fpr_ceiling",target=q,threshold=th,val=rates(v,th),test=rates(t,th)))
     points.append(dict(kind="primary",target=None,threshold=primary,val=rates(v,primary),test=rates(t,primary)))
     # Plot a dense curve on validation-derived candidate thresholds, never optimize on test.
     all_scores=np.unique(np.concatenate([a for a in v.values() if len(a)]))
     indices=np.unique(np.linspace(0,len(all_scores)-1,min(101,len(all_scores)),dtype=int))
-    thresholds=[float(np.nextafter(all_scores[-1],np.inf))]+[float(all_scores[i]) for i in indices[::-1]]
+    thresholds=[float(np.nextafter(np.float32(all_scores[-1]),np.float32(np.inf)))]+[float(all_scores[i]) for i in indices[::-1]]
     curve=[dict(threshold=th,val=rates(v,th),test=rates(t,th)) for th in thresholds]
     return {"points":points,"curve":curve,"score_counts":{s:{k:len(a) for k,a in g.items()} for s,g in (("val",v),("test",t))}}
