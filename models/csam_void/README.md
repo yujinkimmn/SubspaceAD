@@ -98,3 +98,25 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
     python models/csam_void/build_report.py --root D:/csam_results/run01
 
 기존 출력 루트의 index.json, 각 완료 protocol의 results.json 및 selected.json, config.json(선택 기준·목표 표시)이 필요하다. 기존 하위 report.html이 없어도 성능 수치는 생성된다. 결과 JSON이 누락되면 해당 protocol에 missing 안내를 표시한다. 기존 index.html 및 루트 summary.csv는 새 버전으로 교체된다. 원본 이미지/overlay/개별 scores.csv는 HTML에 내장하지 않으므로 필요할 때만 원래 하위 폴더를 함께 복사한다. 설비명과 성능 수치도 사내 보안 정책에 따라 취급한다.
+
+## 8. P0–P5 PaDiM Backbone adaptation (MixStyle)
+
+기존 Exp0–7은 그대로 유지하고 별도 진입점으로 P0–P5를 순서대로 실행한다. 추가 dependency나 pretrained model 다운로드는 없다. 기존 ResNet18 공식 가중치 `resnet18-f37072fd.pth`를 반드시 로컬로 지정한다. 각 실험은 동일한 초기 가중치, seed, manifest split, 입력 letterbox, feature layer1/2/3, 100개 channel 선택 및 Gaussian fit 설정을 사용한다. 이전 실험의 weight를 이어받지 않는다.
+
+    python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/padim01 --protocol both --padim-weights D:/pretrained_weights/resnet18-f37072fd.pth
+
+| 실험 | Backbone 학습 | 데이터 |
+|---|---|---|
+| P0 p0_pretrained | 없음 (기존 Exp0와 동일) | normal Gaussian fit |
+| P1 p1_classification | local head의 max logit으로 image BCE | normal+masked void |
+| P2 p2_classification_mixstyle | P1 + cross-equipment MixStyle | 동일 |
+| P3 p3_consistency | 고정 pretrained teacher의 원본 layer1/2/3 feature와 photometric 변형 student의 상대 MSE + clean anchor | normal only |
+| P4 p4_consistency_mixstyle | P3 + cross-equipment MixStyle | 동일 |
+| P5 p5_pixel_mixstyle | P2 + native mask supervision (class-balanced BCE, hard background BCE, Dice) | normal+masked void |
+
+P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한다. P1–P5는 stem 및 BatchNorm 고정, layer1/2/3 fine-tuning (layer4/fc 미사용), 기본 10 epochs, backbone LR 1e-5, head LR 1e-3. Fixed final epoch를 채택하며 validation proxy는 진단용이다. 분류 head는 fused feature의 local logits을 native shape로 복원해 max pooling하고 P5는 같은 map을 mask와 비교한다. 초기 feature stride 때문에 1px 위치 복원은 제한될 수 있다. MixStyle은 stem, layer1/2 이후 확률 0.5, Beta alpha 0.1로 서로 다른 equipment의 통계를 혼합한다. 학습 batch는 equipment/class group sampling으로 구성한다. MixStyle 실험은 최소 2개 학습 설비 필요하며 실제 적용이 없으면 skipped. P3/4 teacher는 ImageNet weight 고정, normal train만 사용하고 미라벨/val/test는 학습에 사용하지 않는다. P1–P5는 학습 완료 후 head 제거 및 backbone freeze, MixStyle OFF. P0–P5 모두 실제 normal train만으로 원래 PaDiM Gaussian fit 및 동일한 inference를 수행한다.
+
+- 기본 목표 image recall 95%, 1px/2–4px region recall 90% 유지. 별도로 validation-only threshold sweep과 image-only recall/FPR ceiling operating points를 저장해 threshold 문제와 표현력 문제를 구분한다. 1px, 2–4px는 connected component 면적이다. Test는 validation에서 정한 threshold 그대로 평가하며 Test 결과로 선택하지 않는다.
+- `index.html`: 단독 열람 가능한 통합 지표, val/test Recall–FPR curves 및 operating points, backbone proxy 및 실제 weight 변화량. `summary.csv`: 전체 protocol/설비 수치. 각 실험 `model.pt`: PaDiM stats + backbone; P1–P5 `backbone.pt`, `history.json`, `backbone_summary.json`; P0–P5 `operating_points.json`, val/test map/overlay.
+- 빠른 확인: `--protocol pooled --epochs 2`. 일부 실험: `--experiments p0_pretrained p3_consistency p4_consistency_mixstyle`. 기본 batch 8, `--backbone-lr`, `--head-lr`, `--mix-prob`, `--mix-alpha`, `--pixel-weight`, `--anchor-weight` 조절 가능. 기존 `--padim-size`, `--padim-dim`, `--padim-smooth`, `--log-every` 동일.
+- P0는 이 저장소의 Exp0 구현과 동일하며 사내 배포 PaDiM 설정과 동일하다는 보장은 없다. 실제 production 설정이 다르면 비교 전에 일치시킨다. 설비별 blur/PSF 차이는 MixStyle 통계 혼합만으로 해결되지 않을 수 있다. 정상 feature distillation도 실제 void 신호를 보존한다는 보장은 없다. 합성 CPU smoke는 실행 검증이며 실제 CSAM 성능 검증이 아니다.

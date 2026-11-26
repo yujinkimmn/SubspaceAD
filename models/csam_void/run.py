@@ -579,9 +579,12 @@ def run_protocol(parts,args,device,out):
         LOG.info("[Experiment %d/%d] %s / %s START", exp_num,len(args.experiments),out.name,exp)
         if device.type=="cuda": torch.cuda.reset_peak_memory_stats(device)
         try:
-            if exp==EXPS[0]:
+            if exp==EXPS[0] or getattr(args,"padim_suite",False):
                 LOG.info("[PaDiM] feature size=%d channels=%d normal-only fit",args.padim_size,args.padim_dim)
                 model=Padim(args,device)
+                if getattr(args,"padim_suite",False):
+                    from padim_backbone import adapt_backbone
+                    adapt_backbone(model.net,exp,parts,args,device,dest)
                 model.fit([r for r in parts["train"] if r["label"]==0])
                 torch.save(dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
                                 size=args.padim_size,smooth=args.padim_smooth,native_shape=args.native_shape,backbone={k:v.cpu() for k,v in model.net.state_dict().items()}),dest/"model.pt")
@@ -601,6 +604,18 @@ def run_protocol(parts,args,device,out):
             save_eval(parts["val"],vm,th,dest,"val")
             save_eval(parts["test"],tm,th,dest,"test")
             result=dict(experiment=exp,status="ok",threshold=th,val=val,test=test)
+            if getattr(args,"padim_suite",False):
+                from padim_backbone import operating_points
+                points=operating_points(parts["val"],vm,parts["test"],tm,th)
+                result["operating_points"]=points
+                (dest/"operating_points.json").write_text(json.dumps(points,indent=2,allow_nan=False),encoding="utf-8")
+                if (dest/"backbone_summary.json").is_file():
+                    result["backbone"]=json.loads((dest/"backbone_summary.json").read_text(encoding="utf-8"))
+                for point in points["points"]:
+                    if point["kind"]=="image_recall" and point["target"]==.95:
+                        LOG.info("[Image-only 95%% validation recall] val=%s test=%s",point["val"],point["test"])
+                    if point["kind"]=="fpr_ceiling" and point["target"]==.05:
+                        LOG.info("[Validation FPR <=5%%] val=%s test=%s",point["val"],point["test"])
         except SkipExperiment as e:
             result=dict(experiment=exp,status="skipped",error=str(e))
         except Exception as e:
@@ -622,11 +637,14 @@ def run_protocol(parts,args,device,out):
         if device.type=="cuda": torch.cuda.empty_cache()
     return results
 
-def main():
-    p=argparse.ArgumentParser(description=__doc__)
+def main(padim_suite=False):
+    if padim_suite:
+        from padim_backbone import PEXPS
+    choices=PEXPS if padim_suite else EXPS
+    p=argparse.ArgumentParser(description="PaDiM backbone adaptation P0-P5" if padim_suite else __doc__)
     p.add_argument("--manifest",required=True)
     p.add_argument("--out",required=True)
-    p.add_argument("--epochs",type=int,default=30)
+    p.add_argument("--epochs",type=int,default=10 if padim_suite else 30)
     p.add_argument("--log-every",type=int,default=50,help="Batch progress interval; 0 disables batch logs (epoch logs remain)")
     p.add_argument("--batch",type=int,default=8)
     p.add_argument("--min-steps",type=int,default=20)
@@ -641,13 +659,25 @@ def main():
     p.add_argument("--padim-dim",type=int,default=100)
     p.add_argument("--padim-smooth",type=float,default=0.)
     p.add_argument("--padim-weights",help="Local torchvision ResNet18 state_dict; otherwise downloads official ImageNet weights")
-    p.add_argument("--experiments",nargs="+",choices=EXPS,default=EXPS)
+    p.add_argument("--experiments",nargs="+",choices=choices,default=choices)
+    if padim_suite:
+        p.add_argument("--backbone-lr",type=float,default=1e-5)
+        p.add_argument("--head-lr",type=float,default=1e-3)
+        p.add_argument("--mix-prob",type=float,default=.5)
+        p.add_argument("--mix-alpha",type=float,default=.1)
+        p.add_argument("--pixel-weight",type=float,default=1.)
+        p.add_argument("--anchor-weight",type=float,default=1.)
     p.add_argument("--protocol",choices=["pooled","leave-one-equipment-out","both"],default="pooled")
     args=p.parse_args()
+    args.padim_suite=padim_suite
+    if padim_suite and not (args.backbone_lr>0 and args.head_lr>0 and 0<args.mix_prob<=1 and args.mix_alpha>0 and args.pixel_weight>0 and args.anchor_weight>0):
+        p.error("Invalid backbone adaptation hyperparameters")
     if not (0<args.recall<=1 and 0<=args.region_recall<=1 and args.epochs>0 and args.batch>1 and args.min_steps>0 and 1<=args.padim_dim<=448 and args.padim_size>=32 and args.lr>0 and args.padim_smooth>=0):
         p.error("Invalid hyperparameters")
     if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
         p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
+    if padim_suite and not args.padim_weights:
+        p.error("P0-P5 require --padim-weights with a local torchvision ResNet18 state_dict (same starting weights for all runs)")
     if args.log_every < 0:
         p.error("--log-every must be >= 0")
     root=Path(args.out)

@@ -87,6 +87,62 @@ def chart_group(results):
         chart("Test Dice",results,lambda m:m.get("dice"))
     ])+"</div>"
 
+def tradeoff_chart(results,split,key,title):
+    colors=("#2368ae","#c35d36","#27866c","#8861a9","#b08b22","#42616a")
+    parts=[f"<div class='chart'><h4>{esc(title)}</h4>",
+           "<svg viewBox='0 0 320 245' role='img' aria-label='FPR versus recall' style='width:100%;max-height:270px'>"]
+    for i in range(5):
+        x=42+60*i; y=202-45*i
+        parts.append(f"<path d='M{x} 22V202 M42 {y}H282' stroke='#e0e7ef' fill='none'/>")
+        parts.append(f"<text x='{x}' y='218' font-size='10' text-anchor='middle'>{i*25}</text>"
+                     f"<text x='36' y='{y+3}' font-size='10' text-anchor='end'>{i*25}</text>")
+    parts.append("<path d='M42 22V202H282' stroke='#536477' fill='none'/>"
+                 "<text x='162' y='236' font-size='11' text-anchor='middle'>FPR (%)</text>"
+                 "<text transform='translate(12 112) rotate(-90)' font-size='11' text-anchor='middle'>Recall (%)</text>")
+    legend=[]
+    for i,r in enumerate(results):
+        curve=r.get("operating_points",{}).get("curve",[])
+        xy=[(p[split].get("fpr"),p[split].get(key)) for p in curve]
+        xy=[(x,y) for x,y in xy if x is not None and y is not None]
+        if not xy:
+            continue
+        color=colors[i%len(colors)]
+        coords=" ".join(f"{42+240*x:.2f},{202-180*y:.2f}" for x,y in xy)
+        parts.append(f"<polyline points='{coords}' stroke='{color}' stroke-width='1.8' fill='none'/>")
+        legend.append(f"<span style='color:{color}'>&#9632; {esc(r['experiment'].split('_')[0])}</span>")
+    parts.append("</svg><p class='note'>"+" &nbsp; ".join(legend)+"</p></div>")
+    return "".join(parts)
+
+def tradeoff_section(results):
+    if not any(r.get("operating_points") for r in results):
+        return ""
+    body=["<h3>Recall–FPR trade-off (validation-derived thresholds)</h3>",
+          "<p class='note'>All thresholds are derived from validation scores only and then applied unchanged to test. "
+          "Test curves are diagnostic, not threshold-selection tools. Missing region groups remain unavailable.</p>",
+          "<div class='charts'>"]
+    for split in ("val","test"):
+        for key,label in (("recall","image recall"),("region_1px","1px region recall"),("region_2_4px","2–4px region recall")):
+            body.append(tradeoff_chart(results,split,key,f"{split.upper()} {label}"))
+    body.append("</div>")
+    rows=[]; learning=[]
+    for r in results:
+        for p in r.get("operating_points",{}).get("points",[]):
+            if not (p["kind"]=="primary" or p["target"] in (.05,.1,.9,.95)):
+                continue
+            for split in ("val","test"):
+                m=p[split]
+                rows.append(([r["experiment"],p["kind"],percent(p["target"]),split,numeric(p["threshold"]),
+                              percent(m["fpr"]),percent(m["recall"]),percent(m["region_1px"]),percent(m["region_2_4px"])],False))
+        b=r.get("backbone")
+        if b:
+            learning.append(([r["experiment"],b["epochs"],f"{b['weight_max_abs_change']:.6g}",b["mixstyle_calls"],
+                              json.dumps(b["final_proxy"])],False))
+    body.append("<details open><summary>Operating points</summary>"+table(["Experiment","Validation target","Target","Split","Threshold","FPR","Image recall","1px recall","2–4px recall"],rows)+"</details>")
+    if learning:
+        body.append("<details open><summary>Backbone training diagnostics (proxy, not PaDiM performance)</summary>"+
+                    table(["Experiment","Epochs","Max weight change","MixStyle calls","Final validation proxy"],learning)+"</details>")
+    return "".join(body)
+
 def csv_row(proto,eq,r,split="",scope="",equipment="",m=None,best=None):
     m=m or {}
     row=dict(protocol=proto,heldout_equipment=eq,experiment=r.get("experiment"),
@@ -148,6 +204,7 @@ def build_report(root,index=None):
         if (directory/"report.html").is_file():
             section.append(f"<p><a href='{quote(name)}/report.html'>Optional original detailed report</a></p>")
         section.append(chart_group(results))
+        section.append(tradeoff_section(results))
         main_rows=[]; detail_rows=[]; region_rows=[]
         for r in results:
             exp=r["experiment"]; status=r["status"]; is_best=exp==best
