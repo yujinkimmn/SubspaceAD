@@ -33,14 +33,16 @@ python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csa
 
 기존 NAGL CSV 형식 재사용. 모든 경로는 CSV 기준 상대경로 또는 절대경로. 61행×81열 또는 81행×61열의 8-bit 또는 16-bit grayscale PNG/TIFF를 사용한다. 첫 이미지에서 원본 (H,W)를 자동 인식하고 모든 이미지와 mask가 동일한 shape인지 검사한다. transpose/회전하지 않는다. CNN은 원본 shape를 유지하고 PaDiM은 양 방향 letterbox 및 원본 좌표 복원을 지원한다. RGB/DAT는 사전에 변환한다. mask는 같은 크기에서 0=background, 양수=Void. label=0은 확인된 정상(FPN 포함), 1은 실제 Void가 있는 완전한 pixel mask 필수, -1은 미라벨 이미지(train만). 정상 mask는 빈 칸 가능. 미확인 정상은 -1로 넣는다. ref는 train으로 간주한다. 실제 Void 중 일부만 마킹된 이미지는 완전한 mask로 사용하지 않는다.
 
-    image,mask,label,split,equipment,lot
-    images/a.png,,0,train,E1,Y0001
-    images/b.png,masks/b.png,1,train,E1,Y0001
-    images/c.png,,0,val,E2,Y0002
-    images/d.png,masks/d.png,1,val,E2,Y0002
-    images/e.png,,0,test,E3,Y0003
-    images/f.png,masks/f.png,1,test,E3,Y0003
-    images/g.png,,-1,train,E1,Y0004
+    image,mask,label,split,equipment,lot,wafer
+    images/a.png,,0,train,E1,Y0001,01
+    images/b.png,masks/b.png,1,train,E1,Y0001,01
+    images/c.png,,0,val,E2,Y0002,02
+    images/d.png,masks/d.png,1,val,E2,Y0002,02
+    images/e.png,,0,test,E3,Y0003,03
+    images/f.png,masks/f.png,1,test,E3,Y0003,03
+    images/g.png,,-1,train,E1,Y0004,04
+
+`wafer`는 3-panel 시각화용 선택 컬럼이다. `wafer_id`라는 컬럼명도 지원하며 `wafer`가 비어 있으면 이를 사용한다. 둘 다 없거나 빈 경우 패널에 `Wafer: N/A`로 표시한다(파일명에서 임의 추정하지 않음). 문자열 그대로 유지하여 선행 0이 사라지지 않으며 split/학습/metric에 영향이 없다.
 
 위 예시는 형식 설명용이며 충분한 평가 데이터가 아니다. 각 train/val/test에 정상과 실제 Void가 있어야 한다. PaDiM train 정상 최소 2장. 동일 root lot은 전체 설비에서 같은 lot ID로 적고 한 split에만 넣는다. 동일 pixel 이미지도 중복 거부한다. split을 임의 자동 생성하지 않는다(누수 방지). 설비별 일반화 평가에는 각 설비별 독립 lot 및 실제 Mask가 필요하다. 실제 test를 hard negative나 합성 donor로 사용하지 않는다.
 
@@ -67,7 +69,7 @@ Exp0 및 P0–P5의 기본은 기존 프로젝트와 같은 원본 H/W 각각 4�
 
 ## 4. 결과
 
-출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv, raw `<id>.npy`, 정규화 `<id>_normalized.npy`, mask PNG, overlay PNG를 저장한다. CSV의 `score`는 정규화된 image score, `raw_score`는 원본 image score, `prediction`은 image pred_label이다. overlay 빨강=예측, 초록=정답, 노랑=겹침. 모든 val/test 이미지에 `<id>_panel.png` (Original | Anomaly map | Pred mask)도 저장한다. 각 패널은 확대 및 보간 없이 원본 해상도(61×81 또는 81×61, H×W) 그대로 배치한다. Heatmap은 정규화 anomaly map에 OpenCV `COLORMAP_JET`을 적용하며 표시 범위는 항상 [0,1]이다(이미지별 재정규화 없음). Colorbar와 threshold/max score 표시, pred mask는 흰색=불량, 검은색=배경이다. 기존 overlay의 확대 방식은 유지한다. 결과에는 원본 경로 및 이미지 파생물이 있으니 사내 자료로 취급한다.
+출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv를 유지한다. CSV의 `score`는 정규화된 image score, `raw_score`는 원본 image score, `prediction`은 image pred_label이며 `wafer`도 기록한다. 각 val/test 이미지에 시각화 파일은 `<id>_panel.png` (Original | Anomaly map | Pred mask) 하나만 저장한다. 상단에 Lot, Wafer, Equipment, GT label(NORMAL/VOID) 및 GT pixel 수, image prediction/score를 표시한다. 각 패널은 확대 및 보간 없이 원본 해상도(61×81 또는 81×61, H×W) 그대로 배치하며 긴 metadata에는 캔버스만 확장한다. Heatmap은 정규화 anomaly map에 OpenCV `COLORMAP_JET`을 적용하며 표시 범위는 항상 [0,1]이다(이미지별 재정규화 없음). Colorbar와 threshold/max score 표시, pred mask는 흰색=불량, 검은색=배경이다. 별도 mask/overlay PNG와 NPY는 기본 저장하지 않는다. 수치 검증이 필요할 때만 `--save-raw-maps`를 지정해 `<id>.npy`, `<id>_normalized.npy`를 추가 저장한다. 결과에는 원본 경로 및 lot/wafer/설비 정보와 이미지 파생물이 있으니 사내 자료로 취급한다.
 
 최종 threshold는 anomalib `OneClassPostProcessor`의 기본 방식에 맞춰 validation에서 image/pixel 각각 F1-adaptive threshold 및 min/max를 계산한다. `threshold.json`과 `model.pt['post_processor']`에 `image_threshold`, `image_min`, `image_max`, `pixel_threshold`, `pixel_min`, `pixel_max`를 저장한다. 각각 `clip((x - threshold) / (max - min) + 0.5, 0, 1)`로 정규화하며, 정규화된 image score > 0.5로 pred_label, normalized map > 0.5로 pred_mask를 독립 생성한다. Test에서 파라미터를 재계산하지 않는다. max=min인 경우 threshold와의 비교로 0/0.5/1을 반환하여 NaN을 방지한다. F1-adaptive threshold에서는 기존 recall 목표 충족이 보장되지 않는다. CNN의 epoch별 checkpoint 선택은 이전 recall 기반 방식을 유지하고, 최종 추천 모델 역시 validation의 작은 영역 recall 미달, worst-equipment FPR, 전체 FPR, Dice 순으로 선택한다. Test는 독립 보고만 한다. Region은 8-connected component의 pixel 면적이며 hit는 최소 1px overlap이다.
 
@@ -97,7 +99,7 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 
     python models/csam_void/build_report.py --root D:/csam_results/run01
 
-기존 출력 루트의 index.json, 각 완료 protocol의 results.json 및 selected.json, config.json(선택 기준·목표 표시)이 필요하다. 기존 하위 report.html이 없어도 성능 수치는 생성된다. 결과 JSON이 누락되면 해당 protocol에 missing 안내를 표시한다. 기존 index.html 및 루트 summary.csv는 새 버전으로 교체된다. 원본 이미지/overlay/개별 scores.csv는 HTML에 내장하지 않으므로 필요할 때만 원래 하위 폴더를 함께 복사한다. 설비명과 성능 수치도 사내 보안 정책에 따라 취급한다.
+기존 출력 루트의 index.json, 각 완료 protocol의 results.json 및 selected.json, config.json(선택 기준·목표 표시)이 필요하다. 기존 하위 report.html이 없어도 성능 수치는 생성된다. 결과 JSON이 누락되면 해당 protocol에 missing 안내를 표시한다. 기존 index.html 및 루트 summary.csv는 새 버전으로 교체된다. 3-panel 이미지와 개별 scores.csv는 HTML에 내장하지 않으므로 필요할 때만 원래 하위 폴더를 함께 복사한다. 설비명과 성능 수치도 사내 보안 정책에 따라 취급한다.
 
 ## 8. P0–P5 PaDiM Backbone adaptation (MixStyle)
 
@@ -117,7 +119,7 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한다. P1–P5는 stem 및 BatchNorm 고정, layer1/2 fine-tuning (layer4/fc 미사용), 기본 10 epochs, backbone LR 1e-5, head LR 1e-3. Fixed final epoch를 채택하며 validation proxy는 진단용이다. 분류 head는 fused feature의 local logits을 native shape로 복원해 max pooling하고 P5는 같은 map을 mask와 비교한다. 초기 feature stride 때문에 1px 위치 복원은 제한될 수 있다. MixStyle은 stem, layer1 이후 확률 0.5, Beta alpha 0.1로 서로 다른 equipment의 통계를 혼합한다. 학습 batch는 equipment/class group sampling으로 구성한다. MixStyle 실험은 최소 2개 학습 설비 필요하며 실제 적용이 없으면 skipped. P3/4 teacher는 ImageNet weight 고정, normal train만 사용하고 미라벨/val/test는 학습에 사용하지 않는다. P1–P5는 학습 완료 후 head 제거 및 backbone freeze, MixStyle OFF. P0–P5 모두 실제 normal train만으로 원래 PaDiM Gaussian fit 및 동일한 inference를 수행한다.
 
 - 기존 image recall 95%, 1px/2–4px region recall 90% 목표는 참고한다. F1-adaptive 최종 평가와 별도로 기존 raw score 기반 validation-only 공통 threshold sweep 및 image-only recall/FPR ceiling operating points를 저장해 threshold 문제와 표현력 문제를 구분한다. 이 raw 진단 threshold는 정규화된 최종 0.5와 다른 스케일이다. Test는 validation에서 정한 threshold 그대로 평가한다.
-- `index.html`: 단독 열람 가능한 통합 지표, val/test Recall–FPR curves 및 operating points, backbone proxy 및 실제 weight 변화량. `summary.csv`: 전체 protocol/설비 수치. 각 실험 `model.pt`: PaDiM stats + backbone; P1–P5 `backbone.pt`, `history.json`, `backbone_summary.json`; P0–P5 `operating_points.json`, val/test map/overlay.
+- `index.html`: 단독 열람 가능한 통합 지표, val/test Recall–FPR curves 및 operating points, backbone proxy 및 실제 weight 변화량. `summary.csv`: 전체 protocol/설비 수치. 각 실험 `model.pt`: PaDiM stats + backbone; P1–P5 `backbone.pt`, `history.json`, `backbone_summary.json`; P0–P5 `operating_points.json`, val/test 3-panel PNG와 scores.csv.
 - 빠른 확인: `--protocol pooled --epochs 2`. 일부 실험: `--experiments p0_pretrained p3_consistency p4_consistency_mixstyle`. 기본 batch 8, `--backbone-lr`, `--head-lr`, `--mix-prob`, `--mix-alpha`, `--pixel-weight`, `--anchor-weight` 조절 가능. 기존 `--padim-size`, `--padim-dim`, `--padim-smooth`, `--log-every` 동일.
 - P0는 같은 geometry/depth/dim을 지정하면 이 저장소의 Exp0 구현과 동일하며 사내 배포 PaDiM 설정과 동일하다는 보장은 없다. 실제 production 설정이 다르면 비교 전에 일치시킨다. 설비별 blur/PSF 차이는 MixStyle 통계 혼합만으로 해결되지 않을 수 있다. 정상 feature distillation도 실제 void 신호를 보존한다는 보장은 없다. 합성 CPU smoke는 실행 검증이며 실제 CSAM 성능 검증이 아니다.
 

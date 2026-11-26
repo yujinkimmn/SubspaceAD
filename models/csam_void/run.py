@@ -117,6 +117,8 @@ def load_manifest(path):
             split = "train" if split == "ref" else split
             label = int(r["label"])
             eq, lot = r["equipment"].strip(), r["lot"].strip()
+            # Optional display metadata, not a split/label key. Preserve leading zeros.
+            wafer = (r.get("wafer") or "").strip() or (r.get("wafer_id") or "").strip()
             if split not in ("train", "val", "test") or label not in (-1, 0, 1) or not eq or not lot:
                 raise ValueError(f"Bad manifest row {i}")
             if label == -1 and split != "train":
@@ -137,7 +139,7 @@ def load_manifest(path):
                 raise ValueError(f"Duplicate image rows {hashes[digest]} and {i}; deduplicate before running")
             hashes[digest] = i
             rows.append(dict(id=str(i), image=str(p), x=x, raw=raw, y=m, label=label,
-                             split=split, equipment=eq, lot=lot))
+                             split=split, equipment=eq, lot=lot, wafer=wafer))
     if not rows:
         raise ValueError("Empty manifest")
     return rows
@@ -640,20 +642,53 @@ def jet_heatmap(values):
     bgr = cv2.applyColorMap((np.clip(values,0,1)*255).astype(np.uint8),cv2.COLORMAP_JET)
     return cv2.cvtColor(bgr,cv2.COLOR_BGR2RGB)
 
-def save_panel(x, score, threshold, path):
-    """Three native-coordinate views, using the normalized anomaly map and fixed JET [0,1]."""
+def panel_metadata_lines(row, prediction=None, image_score=None):
+    """Build display-only labels from the original manifest row and ground-truth mask."""
+    def display(key):
+        value = " ".join(str(row.get(key) or "").splitlines()).strip()
+        return value or "N/A"
+
+    label = int(row["label"])
+    gt = {0: "NORMAL (0)", 1: "VOID (1)", -1: "UNLABELED (-1)"}[label]
+    gt_pixels = int(np.count_nonzero(row["y"] > 0))
+    lines = [f"Lot: {display('lot')}", f"Wafer: {display('wafer')}",
+             f"Equipment: {display('equipment')}", f"GT: {gt} | GT pixels: {gt_pixels}"]
+    if prediction is not None:
+        predicted = "VOID (1)" if prediction else "NORMAL (0)"
+        line = f"Image prediction: {predicted}"
+        if image_score is not None:
+            line += f" | Score: {float(image_score):.3g}"
+        lines.append(line)
+    return lines
+
+
+def save_panel(x, score, threshold, path, metadata=None):
+    """Three native-coordinate views with optional metadata above the unchanged panels."""
     h, w = x.shape
     original = (np.clip(x, 0, 1) * 255).astype(np.uint8)
     mask = ((score > threshold) * 255).astype(np.uint8)
     panels = [Image.fromarray(original).convert("RGB"), Image.fromarray(jet_heatmap(score)),
               Image.fromarray(mask).convert("RGB")]
-    gap, margin, top, footer = 12, 12, 32, 64
+    gap, margin, footer = 12, 12, 64
     pw, ph = w, h
-    canvas = Image.new("RGB", (2 * margin + 3 * pw + 2 * gap, top + ph + footer), "white")
+    width = 2 * margin + 3 * pw + 2 * gap
+    lines = list(metadata or ())
+    header_height = 0
+    if lines:
+        # Grow only the annotation canvas, never resize the image panels.
+        probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        bounds = [probe.textbbox((0, 0), text, anchor="lt") for text in lines]
+        line_height = max(16, max(b[3] - b[1] for b in bounds) + 4)
+        header_height = 8 + len(lines) * line_height
+        width = max(width, 2 * margin + max(b[2] for b in bounds))
+    top = 32 + header_height
+    canvas = Image.new("RGB", (width, top + ph + footer), "white")
     draw = ImageDraw.Draw(canvas)
+    for i, text in enumerate(lines):
+        draw.text((margin, 6 + i * line_height), text, anchor="lt", fill="black")
     for i, (title, panel) in enumerate(zip(("Original", "Anomaly map", "Pred mask"), panels)):
         left = margin + i * (pw + gap)
-        draw.text((left + pw // 2, 10), title, anchor="mt", fill="black")
+        draw.text((left + pw // 2, 10 + header_height), title, anchor="mt", fill="black")
         canvas.paste(panel, (left, top))
     left, y = margin + pw + gap, top + ph + 7
     bar = jet_heatmap(np.linspace(0, 1, pw, dtype=np.float64)[None, :])
@@ -667,26 +702,21 @@ def save_panel(x, score, threshold, path):
     canvas.save(path)
 
 
-def save_eval(rows,maps,calibration,out,split):
+def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False):
     dest=out/split
     dest.mkdir(exist_ok=True)
-    scores, normalized, pred_labels, pred_masks=post_process(maps,calibration)
-    # Preserve raw native maps; add normalized maps and independent image-level scores.
+    scores, normalized, pred_labels, _=post_process(maps,calibration)
+    # Save a single visual artifact per image. Numeric maps are opt-in for diagnostics.
     with (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
         writer=csv.writer(f)
-        writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score"])
-        for r,m,norm,score,flag,mask in zip(rows,maps,normalized,scores,pred_labels,pred_masks):
-            writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(score),int(flag),float(m.max())])
-            np.save(dest/(r["id"]+".npy"),m)
-            np.save(dest/(r["id"]+"_normalized.npy"),norm)
-            Image.fromarray((mask*255).astype(np.uint8)).save(dest/(r["id"]+"_mask.png"))
-            save_panel(r["x"],norm,NORMALIZED_THRESHOLD,dest/(r["id"]+"_panel.png"))
-            if flag or mask.any() or r["label"]==1:
-                rgb=np.repeat((r["x"]*255).astype(np.uint8)[...,None],3,axis=2)
-                rgb[mask]=[255,65,65]
-                rgb[r["y"]>0]=[65,255,65]
-                rgb[mask&(r["y"]>0)]=[255,255,0]
-                Image.fromarray(rgb).resize((rgb.shape[1]*4,rgb.shape[0]*4),Image.Resampling.NEAREST).save(dest/(r["id"]+"_overlay.png"))
+        writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer"])
+        for r,m,norm,score,flag in zip(rows,maps,normalized,scores,pred_labels):
+            writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(score),int(flag),float(m.max()),r.get("wafer", "")])
+            if save_raw_maps:
+                np.save(dest/(r["id"]+".npy"),m)
+                np.save(dest/(r["id"]+"_normalized.npy"),norm)
+            save_panel(r["x"],norm,NORMALIZED_THRESHOLD,dest/(r["id"]+"_panel.png"),
+                       metadata=panel_metadata_lines(r, flag, score))
 
 def report(results,out,args):
     (out/"results.json").write_text(json.dumps(results,indent=2,allow_nan=False),encoding="utf-8")
@@ -712,7 +742,7 @@ def report(results,out,args):
     esc=lambda v:html.escape("" if v is None else f"{v:.4f}" if isinstance(v,float) else str(v))
     cols=fields[:-1]
     body=["<meta charset='utf-8'><title>CSAM experiments</title><style>body{font:15px system-ui;margin:30px}table{border-collapse:collapse}td,th{padding:7px;border:1px solid #ccc}th{background:#eee}pre{white-space:pre-wrap}</style>",
-          "<h1>CSAM Void Segmentation</h1>",f"<p>Validation-selected candidate: {esc(best)}. Test is report-only. Image recall goal: {args.recall}; small-region recall goal: {args.region_recall}. Final decisions use separate F1-adaptive normalization and threshold &gt; 0.5; recall goals are not guaranteed. Lower FPR is better. Red=prediction, green=GT, yellow=overlap.</p>",
+          "<h1>CSAM Void Segmentation</h1>",f"<p>Validation-selected candidate: {esc(best)}. Test is report-only. Image recall goal: {args.recall}; small-region recall goal: {args.region_recall}. Final decisions use separate F1-adaptive normalization and threshold &gt; 0.5; recall goals are not guaranteed. Lower FPR is better.</p>",
           "<table><tr>"+"".join(f"<th>{esc(k)}</th>" for k in cols)+"</tr>"]
     for row in flat:
         body.append("<tr>"+"".join(f"<td>{esc(row.get(k))}</td>" for k in cols)+"</tr>")
@@ -726,14 +756,14 @@ def report(results,out,args):
         for s in ("val","test"):
             for eq,m in r[s]["by_equipment"].items():
                 body.append("<tr>"+"".join(f"<td>{esc(v)}</td>" for v in (s,eq,m["fp"],m["fn"],m["fpr"],m["recall"],m["dice"]))+"</tr>")
-        body.append(f"</table><p><a href='{name}/test/scores.csv'>Test scores</a> | <a href='{name}/test/'>Maps, masks and panels</a></p>")
+        body.append(f"</table><p><a href='{name}/test/scores.csv'>Test scores</a> | <a href='{name}/test/'>3-panel PNGs</a></p>")
     (out/"report.html").write_text("\n".join(body),encoding="utf-8")
     (out/"selected.json").write_text(json.dumps({"selected_by_validation":best},indent=2),encoding="utf-8")
 
 def run_protocol(parts,args,device,out):
     out.mkdir(parents=True,exist_ok=False)
     (out/"config.json").write_text(json.dumps(vars(args),indent=2),encoding="utf-8")
-    (out/"split_audit.json").write_text(json.dumps({s:[{k:r[k] for k in ("id","image","label","equipment","lot")} for r in rr] for s,rr in parts.items()},indent=2),encoding="utf-8")
+    (out/"split_audit.json").write_text(json.dumps({s:[{k:r[k] for k in ("id","image","label","equipment","lot","wafer")} for r in rr] for s,rr in parts.items()},indent=2),encoding="utf-8")
     results=[]
     log_dataset(parts)
     protocol_start=time.perf_counter()
@@ -775,9 +805,9 @@ def run_protocol(parts,args,device,out):
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
             val,test=metrics(parts["val"],vm,th,"val",calibration),metrics(parts["test"],tm,th,"test",calibration)
-            LOG.info("[Save] val/test maps, masks, overlays, 3-panel PNGs and CSV")
-            save_eval(parts["val"],vm,calibration,dest,"val")
-            save_eval(parts["test"],tm,calibration,dest,"test")
+            LOG.info("[Save] val/test 3-panel PNGs and CSV%s", " + diagnostic NPY maps" if args.save_raw_maps else "")
+            save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps)
+            save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps)
             result=dict(experiment=exp,status="ok",threshold=th,post_processor=calibration,val=val,test=test)
             if getattr(args,"padim_suite",False):
                 from padim_backbone import operating_points
@@ -840,6 +870,7 @@ def main(padim_suite=False):
     p.add_argument("--padim-dim","--n-features","--n_features",dest="padim_dim",type=int,default=40)
     p.add_argument("--padim-smooth",type=float,default=0.)
     p.add_argument("--padim-weights",help="Official local timm resnet18.a1_in1k checkpoint (.safetensors or .pth/.bin); otherwise download it via timm")
+    p.add_argument("--save-raw-maps",action="store_true",help="Optionally save raw and normalized .npy maps for numerical diagnostics; default saves only 3-panel PNGs and scores.csv per split")
     p.add_argument("--experiments",nargs="+",choices=choices,default=choices)
     if padim_suite:
         p.add_argument("--backbone-lr",type=float,default=1e-5)

@@ -26,7 +26,10 @@ def main():
         old=args.baseline/name/"exp0_padim"
         base=out/"p0_pretrained"
         for split in ("val","test"):
-            for f in (old/split).glob("*.npy"):
+            files=list((old/split).glob("*.npy"))
+            assert files, "Run both P0 and Exp0 smoke tests with --save-raw-maps"
+            assert {f.name for f in files}=={f.name for f in (base/split).glob("*.npy")}
+            for f in files:
                 np.testing.assert_allclose(np.load(f),np.load(base/split/f.name),rtol=1e-6,atol=1e-6)
         ref=torch.load(base/"model.pt",map_location="cpu",weights_only=True)
         for r in results:

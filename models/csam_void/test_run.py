@@ -1,11 +1,13 @@
 import unittest
 import tempfile
+import csv
 from pathlib import Path
 from PIL import Image
 import numpy as np
 import torch
 from run import (VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W,
-                 save_panel, pixel_metrics, calibrate_post_processor, post_process, normalize_scores, jet_heatmap)
+                 save_panel, pixel_metrics, calibrate_post_processor, post_process, normalize_scores, jet_heatmap,
+                 load_manifest, panel_metadata_lines, save_eval)
 
 class TestCSAM(unittest.TestCase):
     def test_native_shape_and_grad(self):
@@ -60,6 +62,56 @@ class TestCSAM(unittest.TestCase):
                     b = np.asarray(image)
                 cx, cy = 12+w+12+20, top+10
                 np.testing.assert_array_equal(a[cy,cx], b[cy,cx])
+
+    def test_manifest_optional_wafer_metadata(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            Image.fromarray(np.zeros((H,W),np.uint8)).save(root/"image.png")
+            for extra, values, expected in (([], [], ""), (["wafer"], ["007"], "007"),
+                                            (["wafer_id"], ["008"], "008"),
+                                            (["wafer", "wafer_id"], ["", "009"], "009")):
+                path=root/"manifest.csv"
+                with path.open("w",newline="",encoding="utf-8") as f:
+                    writer=csv.writer(f)
+                    writer.writerow(["image","mask","label","split","equipment","lot",*extra])
+                    writer.writerow(["image.png","",0,"test","EQ-1","LOT-1",*values])
+                row=load_manifest(path)[0]
+                self.assertEqual(row["wafer"],expected)
+                self.assertEqual(panel_metadata_lines(row)[1],f"Wafer: {expected or 'N/A'}")
+
+    def test_panel_metadata_and_panel_only_save(self):
+        for h,w in ((61,81),(81,61)):
+            with tempfile.TemporaryDirectory() as d:
+                root=Path(d)
+                x=np.full((h,w),.3,np.float32)
+                y=np.zeros_like(x); y[10,20]=1; y[10,21]=1
+                raw=y*.8
+                cal=dict(image_threshold=.4,image_min=0.,image_max=1.,pixel_threshold=.5,pixel_min=0.,pixel_max=1.)
+                row=dict(id="7",image="example.png",x=x,y=y,label=1,equipment="EQ-1",lot="L"*90,wafer="007")
+                lines=panel_metadata_lines(row,True,.9)
+                self.assertEqual(lines,["Lot: "+"L"*90,"Wafer: 007","Equipment: EQ-1",
+                                        "GT: VOID (1) | GT pixels: 2","Image prediction: VOID (1) | Score: 0.9"])
+                save_eval([row],raw[None],cal,root,"test")
+                self.assertEqual({p.name for p in (root/"test").iterdir()},{"scores.csv","7_panel.png"})
+                with (root/"test"/"scores.csv").open(newline="",encoding="utf-8") as f:
+                    rec=next(csv.DictReader(f))
+                self.assertEqual(rec["wafer"],"007")
+                self.assertEqual(rec["lot"],row["lot"])
+                with Image.open(root/"test"/"7_panel.png") as im:
+                    a=np.asarray(im)
+                top=a.shape[0]-h-64
+                self.assertGreater(top,32)
+                self.assertGreater(a.shape[1],3*w+48)  # long metadata expands only the canvas
+                self.assertTrue((a[:top-32]!=255).any())
+                norm=post_process(raw[None],cal)[1][0]
+                np.testing.assert_array_equal(a[top:top+h,12:12+w,0],(x*255).astype(np.uint8))
+                np.testing.assert_array_equal(a[top:top+h,24+w:24+2*w],jet_heatmap(norm))
+                left=12+2*(w+12)
+                np.testing.assert_array_equal(a[top:top+h,left:left+w,0],(norm>.5)*255)
+                save_eval([row],raw[None],cal,root,"val",save_raw_maps=True)
+                self.assertEqual({p.name for p in (root/"val").iterdir()},
+                                 {"scores.csv","7_panel.png","7.npy","7_normalized.npy"})
+                np.testing.assert_array_equal(np.load(root/"val"/"7.npy"),raw)
 
     def test_anomalib_normalization_and_independent_thresholds(self):
         y=np.array([[1,0],[0,0]],np.float32)

@@ -33,10 +33,10 @@ def main():
                 if label==1:
                     m=stem+"_mask.png"
                     Image.fromarray(mask).save(out/m)
-                rows.append([image,m,label,split,str(eq),lot])
+                rows.append([image,m,label,split,str(eq),lot,f"{i//6+1:02d}"])
     with (out/"manifest.csv").open("w",newline="",encoding="utf-8") as f:
         w=csv.writer(f)
-        w.writerow(["image","mask","label","split","equipment","lot"])
+        w.writerow(["image","mask","label","split","equipment","lot","wafer"])
         w.writerows(rows)
 if __name__=="__main__":
     main()

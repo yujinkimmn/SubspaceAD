@@ -2,8 +2,8 @@
 import argparse
 import json
 from pathlib import Path
-import numpy as np
 import torch
+from PIL import Image
 
 def main():
     p=argparse.ArgumentParser()
@@ -29,7 +29,12 @@ def main():
         assert int(model["channels"].max())<192 and torch.equal(model["channels"],ref["channels"])
         assert all(torch.equal(v,ref["backbone"][k]) for k,v in model["backbone"].items() if not k.startswith(("layer1.","layer2.")))
         for split in ("val","test"):
-            assert all(np.load(f).shape==native for f in (d/split).glob("*.npy"))
+            panels=list((d/split).glob("*_panel.png"))
+            assert panels and {f.name for f in panels}=={f.name for f in (d/split).glob("*.png")}
+            assert not list((d/split).glob("*.npy"))
+            for f in panels:
+                with Image.open(f) as im:
+                    assert im.height>native[0]+96 and im.width>=native[1]*3+48
         if r["experiment"]!="p0_pretrained":
             summary=json.loads((d/"backbone_summary.json").read_text())
             assert summary["weight_max_abs_change"]>0 and summary["max_layer_depth"]==2

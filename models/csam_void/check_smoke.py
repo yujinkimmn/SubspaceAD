@@ -36,6 +36,9 @@ def main():
         "exp4_copy_paste","exp5_domain_aug","exp6_mixstyle"}
     for row in index:
         directory=a.root/row["protocol"]
+        config=json.loads((directory/"config.json").read_text())
+        audit=json.loads((directory/"split_audit.json").read_text())
+        h,w=config["native_shape"]
         results=json.loads((directory/"results.json").read_text())
         assert {r["experiment"] for r in results}==expected, results
         assert (directory/"report.html").is_file()
@@ -56,25 +59,40 @@ def main():
             for split in ("val","test"):
                 with (d/split/"scores.csv").open(newline="",encoding="utf-8") as f:
                     records=list(csv.DictReader(f))
-                raw=np.stack([np.load(d/split/(rec["id"]+".npy")) for rec in records])
-                scores,norm,labels,masks=post_process(raw,cal)
-                if split=="val":
-                    assert cal["image_min"]==float(raw.max(axis=(1,2)).min())
-                    assert cal["image_max"]==float(raw.max())
-                    assert cal["pixel_min"]==float(raw.min()) and cal["pixel_max"]==float(raw.max())
-                for rec,score,m,pred,mask in zip(records,scores,norm,labels,masks):
-                    assert float(rec["score"])==float(score) and int(rec["prediction"])==int(pred)
-                    np.testing.assert_array_equal(np.load(d/split/(rec["id"]+"_normalized.npy")),m)
-                    with Image.open(d/split/(rec["id"]+"_mask.png")) as im:
-                        np.testing.assert_array_equal(np.asarray(im)>0,mask)
+                by_id={rec["id"]:rec for rec in audit[split]}
+                assert {rec["id"] for rec in records}==set(by_id)
+                assert {p.name for p in (d/split).glob("*.png")}=={rec["id"]+"_panel.png" for rec in records}
+                diagnostic_maps=config.get("save_raw_maps",False)
+                if diagnostic_maps:
+                    raw=np.stack([np.load(d/split/(rec["id"]+".npy")) for rec in records])
+                    scores,norm,labels,masks=post_process(raw,cal)
+                    if split=="val":
+                        assert cal["image_min"]==float(raw.max(axis=(1,2)).min())
+                        assert cal["image_max"]==float(raw.max())
+                        assert cal["pixel_min"]==float(raw.min()) and cal["pixel_max"]==float(raw.max())
+                else:
+                    assert not list((d/split).glob("*.npy"))
+                for i,rec in enumerate(records):
+                    assert all(rec[key]==str(by_id[rec["id"]][key]) for key in ("lot","wafer","equipment","label"))
+                    assert int(rec["prediction"])==int(float(rec["score"])>.5)
+                    with Image.open(d/split/(rec["id"]+"_panel.png")) as im:
+                        panel=np.asarray(im)
+                    top=panel.shape[0]-h-64
+                    left=12+2*(w+12)
+                    assert top>32 and panel.shape[1]>=3*w+48
+                    mask=panel[top:top+h,left:left+w,0]
+                    assert np.isin(mask,[0,255]).all()
+                    if diagnostic_maps:
+                        assert float(rec["score"])==float(scores[i]) and int(rec["prediction"])==int(labels[i])
+                        np.testing.assert_array_equal(np.load(d/split/(rec["id"]+"_normalized.npy")),norm[i])
+                        np.testing.assert_array_equal(mask>0,masks[i])
             if r["experiment"] != "exp0_padim":
                 history=json.loads((d/"history.json").read_text())
                 assert history["best_epoch"] is not None
                 assert all("paste_successes" in e and "best_updated" in e and "mixstyle_calls" in e for e in history["epochs"])
                 if a.semi:
                     assert history["pseudo_positive_pixels"] > 0
-            assert list((d/"test").glob("*.npy"))
-            assert list((d/"test").glob("*_mask.png"))
+            assert list((d/"test").glob("*_panel.png"))
             print(row["protocol"],r["experiment"],"OK")
     print("Synthetic output checks passed")
 if __name__=="__main__":
