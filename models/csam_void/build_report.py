@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
-METRICS = ("recall","fpr","worst_equipment_fpr","underkill","dice","iou","auroc",
+METRICS = ("recall","fpr","worst_equipment_fpr","underkill","dice","iou","auroc","image_auroc","pixel_auroc","image_f1","pixel_aupro",
            "fp_regions_per_normal","tp","fp","tn","fn")
 SIZES = ("1px","2-4px","5+px")
 CSS = """
@@ -46,11 +46,12 @@ def region(m,k,field="recall"):
 def metric_cells(m):
     return [percent(m.get("recall")),percent(m.get("fpr")),percent(m.get("worst_equipment_fpr")),
             percent(m.get("underkill")),numeric(m.get("dice")),numeric(m.get("iou")),
-            numeric(m.get("auroc")),numeric(m.get("fp_regions_per_normal")),
+            numeric(m.get("image_auroc",m.get("auroc"))),numeric(m.get("pixel_auroc")),
+            numeric(m.get("image_f1")),numeric(m.get("pixel_aupro")),numeric(m.get("fp_regions_per_normal")),
             *[percent(region(m,k)) for k in SIZES],
             *[numeric(m.get(k)) for k in ("tp","fp","tn","fn")]]
 
-HEAD = ["Recall","FPR","Worst FPR","Underkill","Dice","IoU","AUROC","FP regions / normal",
+HEAD = ["Recall","FPR","Worst FPR","Underkill","Dice","IoU","Image AUROC","Pixel AUROC","Image F1","Pixel AUPRO@0.30","FP regions / normal",
         "1px recall","2–4px recall","5+px recall","TP","FP","TN","FN"]
 
 def table(headers,rows):
@@ -84,7 +85,10 @@ def chart_group(results):
         chart("Test image recall · higher is better",results,lambda m:m.get("recall")),
         chart("Test 1px region recall",results,lambda m:region(m,"1px"),"tiny"),
         chart("Test 2–4px region recall",results,lambda m:region(m,"2-4px"),"tiny"),
-        chart("Test Dice",results,lambda m:m.get("dice"))
+        chart("Test Dice",results,lambda m:m.get("dice")),
+        chart("Test image F1",results,lambda m:m.get("image_f1")),
+        chart("Test pixel AUROC",results,lambda m:m.get("pixel_auroc")),
+        chart("Test pixel AUPRO@0.30",results,lambda m:m.get("pixel_aupro"))
     ])+"</div>"
 
 def tradeoff_chart(results,split,key,title):
@@ -231,6 +235,13 @@ def build_report(root,index=None):
                 holdout.append(([eq,display,percent(m.get("fpr")),percent(m.get("recall")),
                                  numeric(m.get("dice")),percent(region(m,"1px")),percent(region(m,"2-4px")),
                                  numeric(m.get("fp")),numeric(m.get("fn"))],is_best))
+        section.append("<h3>Standard metrics (validation/test)</h3>")
+        standard=[]
+        for r in results:
+            if r["status"] != "ok": continue
+            v,t=r["val"],r["test"]
+            standard.append(([r["experiment"],numeric(v.get("image_auroc",v.get("auroc"))),numeric(v.get("pixel_auroc")),numeric(t.get("image_f1")),numeric(t.get("pixel_aupro")),numeric(t.get("pixel_auroc"))],r["experiment"]==best))
+        section.append(table(["Experiment","Val image AUROC","Val pixel AUROC","Test image F1","Test pixel AUPRO@0.30","Test pixel AUROC"],standard))
         section.append("<h3>All experiments · validation & test</h3>")
         section.append(table(["Experiment","Status","Split","Threshold",*HEAD,"Error"],main_rows))
         section.append("<details open><summary>Region hit / count (native pixel area)</summary>"+
@@ -256,6 +267,7 @@ def build_report(root,index=None):
     content += sections
     content += ["<footer>FPR = FP / (FP + TN); image recall = TP / (TP + FN). Region recall = fraction of "
                 "ground-truth connected components touched by at least one predicted pixel. Size is pixel area, not diameter. "
+                "Pixel AUPRO integrates region-balanced overlap up to pixel FPR 0.30, normalized by 0.30. "
                 "Missing values are not zero. Worst FPR is unavailable at individual-equipment scope. "
                 "Thresholds are calibrated separately per protocol and model; scores are not directly comparable. "
                 "No source images or per-image paths are embedded.</footer></main></body></html>"]
