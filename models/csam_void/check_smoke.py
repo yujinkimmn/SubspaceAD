@@ -2,6 +2,11 @@
 import argparse
 import json
 from pathlib import Path
+from PIL import Image
+import csv
+import numpy as np
+import torch
+from run import post_process
 
 def main():
     p=argparse.ArgumentParser()
@@ -44,9 +49,24 @@ def main():
             d=directory/r["experiment"]
             for f in ("model.pt","threshold.json","test/scores.csv","val/scores.csv"):
                 assert (d/f).is_file(),d/f
-            assert r["val"]["recall"]>=.95-1e-7,r
-            for k in ("1px","2-4px"):
-                assert r["val"]["regions"][k]["recall"]>=.90-1e-7,r
+            # Final calibrated decisions follow anomalib's F1 thresholds, not the former recall-target raw threshold.
+            cal=json.loads((d/"threshold.json").read_text())
+            assert cal==r["post_processor"]==torch.load(d/"model.pt",map_location="cpu",weights_only=True)["post_processor"]
+            assert cal["source"]=="validation" and cal["threshold"]==.5
+            for split in ("val","test"):
+                with (d/split/"scores.csv").open(newline="",encoding="utf-8") as f:
+                    records=list(csv.DictReader(f))
+                raw=np.stack([np.load(d/split/(rec["id"]+".npy")) for rec in records])
+                scores,norm,labels,masks=post_process(raw,cal)
+                if split=="val":
+                    assert cal["image_min"]==float(raw.max(axis=(1,2)).min())
+                    assert cal["image_max"]==float(raw.max())
+                    assert cal["pixel_min"]==float(raw.min()) and cal["pixel_max"]==float(raw.max())
+                for rec,score,m,pred,mask in zip(records,scores,norm,labels,masks):
+                    assert float(rec["score"])==float(score) and int(rec["prediction"])==int(pred)
+                    np.testing.assert_array_equal(np.load(d/split/(rec["id"]+"_normalized.npy")),m)
+                    with Image.open(d/split/(rec["id"]+"_mask.png")) as im:
+                        np.testing.assert_array_equal(np.asarray(im)>0,mask)
             if r["experiment"] != "exp0_padim":
                 history=json.loads((d/"history.json").read_text())
                 assert history["best_epoch"] is not None

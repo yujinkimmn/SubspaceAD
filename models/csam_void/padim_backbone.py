@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score
 from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
-                 padim_preprocess, restore_padim_map)
+                 padim_input, padim_preprocess, restore_padim_map)
 
 PEXPS = ["p0_pretrained", "p1_classification", "p2_classification_mixstyle",
          "p3_consistency", "p4_consistency_mixstyle", "p5_pixel_mixstyle"]
@@ -38,7 +38,7 @@ def preprocess(x,size,upsample_factor=None):
     return padim_preprocess(x,size,upsample_factor)
 
 def layers(net,x,mix=None,domains=(),depth=3):
-    stem=net.maxpool(net.relu(net.bn1(net.conv1(x))))
+    stem=net.maxpool(net.act1(net.bn1(net.conv1(x))))
     features=[]
     for i in range(1,depth+1):
         if mix is not None:
@@ -77,27 +77,27 @@ def batch_rows(rows,batch,steps,supervised,seed):
             chosen[-1]=rng.choice(groups[rng.choice(other)])
         yield chosen
 
-def tensors(rows,device,augment=False):
-    x=np.stack([domain_aug(r["x"]) if augment else r["x"] for r in rows])
+def tensors(rows,args,device,transform=None):
+    x=[padim_input(r,transform(r["x"]) if transform else None) for r in rows]
+    z,crop=preprocess(x,args.padim_size,args.upsample_factor)
     y=np.stack([r["y"] for r in rows])
-    return torch.from_numpy(x[:,None]).to(device),torch.from_numpy(y[:,None]).to(device)
+    return z.to(device),crop,torch.from_numpy(y[:,None]).to(device)
 
 @torch.no_grad()
 def proxy_eval(net,head,teacher,rows,args,device,supervised):
     scores=[]; labels=[]; losses=[]; inter=predpix=truepix=0
     for start in range(0,len(rows),args.batch):
         rr=rows[start:start+args.batch]
-        x,y=tensors(rr,device)
-        z,crop=preprocess(x,args.padim_size,args.upsample_factor)
+        z,crop,y=tensors(rr,args,device)
         if supervised:
-            logits=head(layers(net,z,depth=args.max_layer_depth),crop,args.padim_size,x.shape[-2:],args.upsample_factor)
+            logits=head(layers(net,z,depth=args.max_layer_depth),crop,args.padim_size,y.shape[-2:],args.upsample_factor)
             scores.extend(logits.flatten(1).amax(1).cpu().tolist())
             labels.extend(r["label"] for r in rr)
             pred=logits>=0
             inter+=int((pred & (y>0)).sum())
             predpix+=int(pred.sum()); truepix+=int(y.sum())
         else:
-            changed,_=preprocess((x*1.10+.03).clamp(0,1),args.padim_size,args.upsample_factor)
+            changed,_,_=tensors(rr,args,device,lambda x:np.clip(x*1.10+.03,0,1))
             losses.append((len(rr),float(consistency(layers(net,changed,depth=args.max_layer_depth),layers(teacher,z,depth=args.max_layer_depth)))))
     if supervised:
         return {"head_image_auroc":float(roc_auc_score(labels,scores)) if len(set(labels))==2 else None,
@@ -143,18 +143,16 @@ def adapt_backbone(net,exp,parts,args,device,out):
         before=mix.applied if mix else 0
         if mix is not None: mix.train()
         for step,rr in enumerate(batch_rows(train,args.batch,steps,supervised,args.seed+epoch),1):
-            x,y=tensors(rr,device)
+            clean,crop,y=tensors(rr,args,device)
             domains=[r["equipment"] for r in rr]
-            clean,crop=preprocess(x,args.padim_size,args.upsample_factor)
             if supervised:
-                logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,x.shape[-2:],args.upsample_factor)
-                labels=torch.tensor([r["label"] for r in rr],device=device,dtype=x.dtype)
+                logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,y.shape[-2:],args.upsample_factor)
+                labels=torch.tensor([r["label"] for r in rr],device=device,dtype=clean.dtype)
                 task=F.binary_cross_entropy_with_logits(logits.flatten(1).amax(1),labels)
                 anchor=loss_fn(logits,y,hard=True) if idx==5 else task.new_zeros(())
                 loss=task+args.pixel_weight*anchor
             else:
-                augmented,_=tensors(rr,device,augment=True)
-                augmented,_=preprocess(augmented,args.padim_size,args.upsample_factor)
+                augmented,_,_=tensors(rr,args,device,domain_aug)
                 with torch.no_grad(): target=layers(teacher,clean,depth=args.max_layer_depth)
                 task=consistency(layers(net,augmented,mix,domains,args.max_layer_depth),target)
                 anchor=consistency(layers(net,clean,depth=args.max_layer_depth),target)
@@ -226,7 +224,8 @@ def operating_points(val_rows,vm,test_rows,tm,primary):
         a=v["normal"]; allowed=math.floor(q*len(a))
         th=float(np.nextafter(np.float32(a[len(a)-allowed-1]),np.float32(np.inf))) if allowed<len(a) else float(min(a[0],v["positive"][0]))
         points.append(dict(kind="fpr_ceiling",target=q,threshold=th,val=rates(v,th),test=rates(t,th)))
-    points.append(dict(kind="primary",target=None,threshold=primary,val=rates(v,primary),test=rates(t,primary)))
+    if primary is not None:
+        points.append(dict(kind="primary",target=None,threshold=primary,val=rates(v,primary),test=rates(t,primary)))
     # Plot a dense curve on validation-derived candidate thresholds, never optimize on test.
     all_scores=np.unique(np.concatenate([a for a in v.values() if len(a)]))
     indices=np.unique(np.linspace(0,len(all_scores)-1,min(101,len(all_scores)),dtype=int))

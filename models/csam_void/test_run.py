@@ -4,7 +4,8 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 import torch
-from run import VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W, save_panel, pixel_metrics
+from run import (VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W,
+                 save_panel, pixel_metrics, calibrate_post_processor, post_process, normalize_scores, jet_heatmap)
 
 class TestCSAM(unittest.TestCase):
     def test_native_shape_and_grad(self):
@@ -50,7 +51,8 @@ class TestCSAM(unittest.TestCase):
                 original = a[top:top+h, 12:12+w, 0]
                 np.testing.assert_array_equal(original, (x*255).astype(np.uint8))
                 mask = a[top:top+h, left:left+w, 0]
-                np.testing.assert_array_equal(mask, (score>=.5)*255)
+                np.testing.assert_array_equal(mask, (score>.5)*255)
+                np.testing.assert_array_equal(a[top:top+h,12+w+12:12+2*w+12],jet_heatmap(score))
                 p2 = Path(d) / "panel2.png"
                 score[0, 0] = 99
                 save_panel(x, score, .5, p2)
@@ -58,6 +60,44 @@ class TestCSAM(unittest.TestCase):
                     b = np.asarray(image)
                 cx, cy = 12+w+12+20, top+10
                 np.testing.assert_array_equal(a[cy,cx], b[cy,cx])
+
+    def test_anomalib_normalization_and_independent_thresholds(self):
+        y=np.array([[1,0],[0,0]],np.float32)
+        rows=[dict(label=1,y=y,equipment="a"),dict(label=0,y=y*0,equipment="b")]
+        maps=np.array([[[6,4],[4,2]],[[5,1],[1,1]]],np.float32)
+        cal=calibrate_post_processor(rows,maps)
+        self.assertEqual((cal["image_min"],cal["image_max"]),(5,6))
+        self.assertEqual((cal["pixel_min"],cal["pixel_max"]),(1,6))
+        self.assertEqual(cal["image_threshold"],6.)
+        self.assertEqual(cal["pixel_threshold"],6.)
+        # Test calibration stays frozen; map and image score are normalized independently.
+        test=np.array([[[6.2,6],[4,1]],[[7,3],[2,0]]],np.float32)
+        scores,pixels,labels,masks=post_process(test,cal)
+        np.testing.assert_allclose(scores,[.7,1.],atol=1e-6)
+        np.testing.assert_allclose(pixels[0],[[.54,.5],[.1,0]],atol=1e-6)
+        self.assertTrue(labels[0]); self.assertTrue(masks[0,0,0]); self.assertFalse(masks[0,0,1])
+        self.assertNotEqual(float(scores[0]),float(pixels[0].max()))
+        np.testing.assert_array_equal(normalize_scores([0,2,4],2,2,2),[0,.5,1])
+        # Sensitivity 0.5 means strict > 0.5, just as OneClassPostProcessor does.
+        self.assertFalse(post_process(maps,cal)[2].any())
+        self.assertEqual(metrics(rows,test,.5,"test",cal)["tp"],1)
+
+    def test_jet_uses_opencv_lut_without_per_image_normalization(self):
+        import cv2
+        values=np.array([[0,.25,.5,.75,1]],np.float32)
+        expected=cv2.applyColorMap((values*255).astype(np.uint8),cv2.COLORMAP_JET)[:,:,::-1]
+        np.testing.assert_array_equal(jet_heatmap(values),expected)
+
+    def test_image_and_pixel_thresholds_can_differ(self):
+        y=np.array([[1,0],[0,0]],np.float32)
+        rows=[dict(label=1,y=y,equipment="a"),dict(label=0,y=y*0,equipment="b")]
+        maps=np.array([[[6,9],[4,2]],[[5,1],[1,1]]],np.float32)
+        cal=calibrate_post_processor(rows,maps)
+        self.assertEqual(cal["image_threshold"],9.)
+        self.assertEqual(cal["pixel_threshold"],6.)
+        scores,pixels,labels,masks=post_process(np.array([[[7,1],[1,1]]],np.float32),cal)
+        self.assertFalse(labels[0])
+        self.assertTrue(masks[0,0,0])
 
     def test_aligned_standard_metrics(self):
         y = np.array([[1,0,0],[0,0,0]],dtype=np.float32)

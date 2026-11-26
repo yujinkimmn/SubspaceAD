@@ -21,6 +21,8 @@ def main():
         d=root/r["experiment"]
         model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
         assert model["upsample_factor"]==4 and model["max_layer_depth"]==2 and model["n_features"]==40
+        assert model["backbone_name"]=="resnet18.a1_in1k"
+        assert model["post_processor"]==r["post_processor"]
         assert tuple(model["feature_shape"])==native
         assert tuple(model["mu"].shape)==(native[0]*native[1],40)
         assert tuple(model["chol"].shape)==(native[0]*native[1],40,40)

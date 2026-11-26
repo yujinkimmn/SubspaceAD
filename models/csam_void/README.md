@@ -12,19 +12,19 @@
 
 | 실험 | 필요한 가중치 | 공식 다운로드 |
 |---|---|---|
-| Exp0 — PaDiM | ResNet18 ImageNet-1K V1 (`resnet18-f37072fd.pth`, 약 44.7 MiB) | [PyTorch 공식 가중치 다운로드](https://download.pytorch.org/models/resnet18-f37072fd.pth) |
+| Exp0 / P0–P5 — PaDiM | timm `resnet18.a1_in1k` (`resnet18_a1_0-d63eafa0.pth`) | [timm 공식 가중치 다운로드](https://github.com/huggingface/pytorch-image-models/releases/download/v0.1-rsb-weights/resnet18_a1_0-d63eafa0.pth) |
 | Exp1–7 — CNN, MixStyle, Semi-supervised 등 | 없음 (처음부터 학습) | — |
 
-- 공식 모델 문서: [torchvision ResNet18](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html)
+- 공식 모델 문서: [timm/resnet18.a1_in1k](https://huggingface.co/timm/resnet18.a1_in1k). torchvision ResNet18 기본 가중치와 backbone의 계층 구조는 유사하지만 학습 recipe 및 실제 weight가 다르다. 기존 `resnet18-f37072fd.pth`는 사용하지 않는다.
 - 인터넷 연결이 가능한 PC에서 가중치를 다운로드하고, 사내 보안 절차에 따라 로컬 PC로 반입한다.
-- 예시 저장 경로: `D:/pretrained_weights/resnet18-f37072fd.pth`
-- 파일의 SHA-256을 확인하려면 PowerShell에서 `Get-FileHash D:/pretrained_weights/resnet18-f37072fd.pth -Algorithm SHA256`을 실행한다. 공식 파일명에 포함된 SHA-256 접두사는 `f37072fd`이다. 접두사 확인은 전체 해시 검증을 대체하지 않는다.
-- `--padim-weights`를 지정하면 Exp0이 로컬 가중치를 읽으며 torchvision의 자동 가중치 다운로드를 사용하지 않는다. Exp1–7은 외부 모델이 필요 없다. Python 의존성은 별도 설치되어 있어야 한다.
+- 예시 저장 경로: `D:/pretrained_weights/resnet18_a1_0-d63eafa0.pth`
+- SHA-256 확인: PowerShell에서 `Get-FileHash D:/pretrained_weights/resnet18_a1_0-d63eafa0.pth -Algorithm SHA256`. 공식 파일명의 해시 접두사는 `d63eafa0`이다. 접두사 확인은 전체 해시 검증을 대체하지 않는다. Hugging Face의 동일 모델 `model.safetensors`도 사용할 수 있다.
+- `--padim-weights`를 지정하면 `timm.create_model('resnet18.a1_in1k', pretrained=False, checkpoint_path=...)`로 로컬 가중치를 엄격하게 로드한다. 자동 다운로드는 하지 않는다. 파일의 출처는 사용자가 확인해야 한다. Exp1–7은 외부 모델이 필요 없다.
 
 폐쇄망 전체 실험 실행 예시:
 
 ```powershell
-python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/run01 --protocol both --padim-weights D:/pretrained_weights/resnet18-f37072fd.pth
+python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/run01 --protocol both --padim-weights D:/pretrained_weights/resnet18_a1_0-d63eafa0.pth
 ```
 
 인터넷 사용이 가능한 환경에서만 `--padim-weights`를 생략해 공식 가중치를 자동 다운로드하도록 할 수 있다. 모델 파일, 사내 데이터, 학습 결과는 GitHub에 커밋하지 않는다.
@@ -63,13 +63,13 @@ python models/csam_void/run.py --manifest D:/csam_data/manifest.csv --out D:/csa
 
 각 실험은 독립 초기화이며 Exp1~7은 누적 ablation이다. 기존 NAGL FP를 별도로 자동 import하지 않는다. 확인된 train 정상 데이터로 포함하면 Exp3에서 활용 가능. Copy-paste는 동일 위치에서 양의 residual이 존재할 때만 합성한다. 설비별 PSF를 복원하지 않으며 합성 이미지의 실제성은 확인 필요. MixStyle은 batch 내 무작위 pairing이며 반드시 다른 설비끼리 섞는 것은 아니다. Exp7은 미라벨 train 데이터가 없거나 confident positive pseudo-label이 없으면 skip한다. 재학습 없는 resume은 현재 미지원.
 
-Exp0은 기존 사내 PaDiM checkpoint와 동일한 구현이라는 보장이 없다. resize/padding, feature layer, channel 수, smoothing 차이가 있을 수 있다. --padim-size, --padim-dim, --padim-smooth 조절 가능. CNN은 resize나 pooling 없이 원본 해상도를 유지한다.
+Exp0 및 P0–P5의 기본은 기존 프로젝트와 같은 원본 H/W 각각 4배 확대(패딩 없음), `max_layer_depth=2`, `n_features=40`, smoothing=0이다. 원본 integer pixel을 `ToImage → Resize(antialias=True) → ToDtype(torch.float32, scale=True)` 순서로 처리하고 grayscale을 RGB 3채널로 복제한다. ImageNet mean/std 정규화는 사용하지 않는다. Backbone adaptation과 Gaussian fit/inference 모두 이 전처리를 공유한다. `--padim-size`, `--padim-dim`, `--padim-smooth`로 명시적 ablation 가능. CNN은 원본 해상도를 유지한다. 이 설정을 맞췄더라도 사내 anomalib 모델의 feature sampling, Gaussian 계산, 보간 및 버전 차이로 checkpoint/score의 완전한 일치를 보장하지 않는다.
 
 ## 4. 결과
 
-출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv, raw NPY, mask PNG, overlay PNG를 저장한다. overlay 빨강=예측, 초록=정답, 노랑=겹침. 모든 val/test 이미지에 `<id>_panel.png` (Original | Anomaly map | Pred mask)도 저장한다. 세 패널은 확대 및 보간 없이 원본 해상도(61×81 또는 81×61, H×W) 그대로 배치한다. 제목, 여백, colorbar가 포함되어 전체 합성 PNG의 크기는 원본 이미지 한 장보다 크다. 기존 overlay 파일의 확대 방식은 변경하지 않는다. Heatmap 표시 범위는 실험별 validation threshold의 0~2배로 고정(0 이하 threshold는 0~1), 상한 초과값은 색상만 포화하며 raw NPY 및 예측 mask는 그대로 유지한다. Colorbar와 threshold/max score를 표시하고, pred mask는 흰색=불량, 검은색=배경이다. 결과에는 원본 경로 및 이미지 파생물이 있으니 사내 자료로 취급한다.
+출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv, raw `<id>.npy`, 정규화 `<id>_normalized.npy`, mask PNG, overlay PNG를 저장한다. CSV의 `score`는 정규화된 image score, `raw_score`는 원본 image score, `prediction`은 image pred_label이다. overlay 빨강=예측, 초록=정답, 노랑=겹침. 모든 val/test 이미지에 `<id>_panel.png` (Original | Anomaly map | Pred mask)도 저장한다. 각 패널은 확대 및 보간 없이 원본 해상도(61×81 또는 81×61, H×W) 그대로 배치한다. Heatmap은 정규화 anomaly map에 OpenCV `COLORMAP_JET`을 적용하며 표시 범위는 항상 [0,1]이다(이미지별 재정규화 없음). Colorbar와 threshold/max score 표시, pred mask는 흰색=불량, 검은색=배경이다. 기존 overlay의 확대 방식은 유지한다. 결과에는 원본 경로 및 이미지 파생물이 있으니 사내 자료로 취급한다.
 
-Threshold는 validation에서 이미지 recall 및 존재하는 1px/2–4px 연결성분 recall 목표를 충족하는 가장 높은 값으로 고정. test에서 다시 조정하지 않는다. best checkpoint 및 추천 모델은 validation 기준(작은 영역 recall 미달 우선, worst-equipment FPR, 전체 FPR, Dice)으로 선택한다. Test는 독립 보고만 한다. size bin은 지름이 아니라 8-connected component의 pixel 면적이다. region recall은 최소 1px overlap으로 정의하고 Dice/IoU로 정밀도를 보완한다. 해당 결함 크기가 없으면 null이며 recall 충족을 입증하지 못한다. 운영 적용 전 충분한 신규 lot/설비 및 작은 Void 수량이 필요하다.
+최종 threshold는 anomalib `OneClassPostProcessor`의 기본 방식에 맞춰 validation에서 image/pixel 각각 F1-adaptive threshold 및 min/max를 계산한다. `threshold.json`과 `model.pt['post_processor']`에 `image_threshold`, `image_min`, `image_max`, `pixel_threshold`, `pixel_min`, `pixel_max`를 저장한다. 각각 `clip((x - threshold) / (max - min) + 0.5, 0, 1)`로 정규화하며, 정규화된 image score > 0.5로 pred_label, normalized map > 0.5로 pred_mask를 독립 생성한다. Test에서 파라미터를 재계산하지 않는다. max=min인 경우 threshold와의 비교로 0/0.5/1을 반환하여 NaN을 방지한다. F1-adaptive threshold에서는 기존 recall 목표 충족이 보장되지 않는다. CNN의 epoch별 checkpoint 선택은 이전 recall 기반 방식을 유지하고, 최종 추천 모델 역시 validation의 작은 영역 recall 미달, worst-equipment FPR, 전체 FPR, Dice 순으로 선택한다. Test는 독립 보고만 한다. Region은 8-connected component의 pixel 면적이며 hit는 최소 1px overlap이다.
 
 ## 5. 로컬 검증
 
@@ -101,13 +101,13 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 
 ## 8. P0–P5 PaDiM Backbone adaptation (MixStyle)
 
-기존 Exp0–7은 그대로 유지하고 별도 진입점으로 P0–P5를 순서대로 실행한다. 추가 dependency나 pretrained model 다운로드는 없다. 기존 ResNet18 공식 가중치 `resnet18-f37072fd.pth`를 반드시 로컬로 지정한다. 각 실험은 동일한 초기 가중치, seed, manifest split, 원본 H/W 각각 4배 확대(패딩 없음), feature layer1/2, 192개 중 40개 channel 선택 및 Gaussian fit 설정을 사용한다. 이전 실험의 weight를 이어받지 않는다.
+별도 진입점으로 P0–P5를 순서대로 실행한다. 공식 timm `resnet18.a1_in1k` 가중치를 반드시 로컬로 지정한다. 각 실험은 동일한 초기 가중치, seed, manifest split, 원본 H/W 각각 4배 확대(패딩 없음), feature layer1/2, 192개 중 40개 channel 선택 및 Gaussian fit 설정을 사용한다. 이전 실험의 weight를 이어받지 않는다.
 
-    python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/padim01 --protocol both --padim-weights D:/pretrained_weights/resnet18-f37072fd.pth
+    python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out D:/csam_results/padim01 --protocol both --padim-weights D:/pretrained_weights/resnet18_a1_0-d63eafa0.pth
 
 | 실험 | Backbone 학습 | 데이터 |
 |---|---|---|
-| P0 p0_pretrained | 없음 (기존 Exp0와 동일한 알고리즘, P suite 기본 geometry/depth/dim은 변경) | normal Gaussian fit |
+| P0 p0_pretrained | 없음 (Exp0와 동일한 알고리즘 및 기본 설정) | normal Gaussian fit |
 | P1 p1_classification | local head의 max logit으로 image BCE | normal+masked void |
 | P2 p2_classification_mixstyle | P1 + cross-equipment MixStyle | 동일 |
 | P3 p3_consistency | 고정 pretrained teacher의 원본 layer1/2 feature와 photometric 변형 student의 상대 MSE + clean anchor | normal only |
@@ -116,7 +116,7 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 
 P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한다. P1–P5는 stem 및 BatchNorm 고정, layer1/2 fine-tuning (layer4/fc 미사용), 기본 10 epochs, backbone LR 1e-5, head LR 1e-3. Fixed final epoch를 채택하며 validation proxy는 진단용이다. 분류 head는 fused feature의 local logits을 native shape로 복원해 max pooling하고 P5는 같은 map을 mask와 비교한다. 초기 feature stride 때문에 1px 위치 복원은 제한될 수 있다. MixStyle은 stem, layer1 이후 확률 0.5, Beta alpha 0.1로 서로 다른 equipment의 통계를 혼합한다. 학습 batch는 equipment/class group sampling으로 구성한다. MixStyle 실험은 최소 2개 학습 설비 필요하며 실제 적용이 없으면 skipped. P3/4 teacher는 ImageNet weight 고정, normal train만 사용하고 미라벨/val/test는 학습에 사용하지 않는다. P1–P5는 학습 완료 후 head 제거 및 backbone freeze, MixStyle OFF. P0–P5 모두 실제 normal train만으로 원래 PaDiM Gaussian fit 및 동일한 inference를 수행한다.
 
-- 기본 목표 image recall 95%, 1px/2–4px region recall 90% 유지. 별도로 validation-only threshold sweep과 image-only recall/FPR ceiling operating points를 저장해 threshold 문제와 표현력 문제를 구분한다. 1px, 2–4px는 connected component 면적이다. Test는 validation에서 정한 threshold 그대로 평가하며 Test 결과로 선택하지 않는다.
+- 기존 image recall 95%, 1px/2–4px region recall 90% 목표는 참고한다. F1-adaptive 최종 평가와 별도로 기존 raw score 기반 validation-only 공통 threshold sweep 및 image-only recall/FPR ceiling operating points를 저장해 threshold 문제와 표현력 문제를 구분한다. 이 raw 진단 threshold는 정규화된 최종 0.5와 다른 스케일이다. Test는 validation에서 정한 threshold 그대로 평가한다.
 - `index.html`: 단독 열람 가능한 통합 지표, val/test Recall–FPR curves 및 operating points, backbone proxy 및 실제 weight 변화량. `summary.csv`: 전체 protocol/설비 수치. 각 실험 `model.pt`: PaDiM stats + backbone; P1–P5 `backbone.pt`, `history.json`, `backbone_summary.json`; P0–P5 `operating_points.json`, val/test map/overlay.
 - 빠른 확인: `--protocol pooled --epochs 2`. 일부 실험: `--experiments p0_pretrained p3_consistency p4_consistency_mixstyle`. 기본 batch 8, `--backbone-lr`, `--head-lr`, `--mix-prob`, `--mix-alpha`, `--pixel-weight`, `--anchor-weight` 조절 가능. 기존 `--padim-size`, `--padim-dim`, `--padim-smooth`, `--log-every` 동일.
 - P0는 같은 geometry/depth/dim을 지정하면 이 저장소의 Exp0 구현과 동일하며 사내 배포 PaDiM 설정과 동일하다는 보장은 없다. 실제 production 설정이 다르면 비교 전에 일치시킨다. 설비별 blur/PSF 차이는 MixStyle 통계 혼합만으로 해결되지 않을 수 있다. 정상 feature distillation도 실제 void 신호를 보존한다는 보장은 없다. 합성 CPU smoke는 실행 검증이며 실제 CSAM 성능 검증이 아니다.
@@ -138,10 +138,10 @@ P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한
 | Test | Pixel AUPRO@0.30 (`pixel_aupro`) | anomaly_map, gt_mask |
 | Test | Pixel AUROC (`pixel_auroc`) | anomaly_map, gt_mask |
 
-모든 Exp0–7/P0–5의 최종 validation/test 평가에 적용하고, protocol별 results.json/summary.csv/report.html 및 통합 index.html/summary.csv에 출력한다. 기존 auroc 키는 Image AUROC 호환용으로 유지한다. 실무용 Recall/FPR/Worst Equipment FPR/Region Recall/Dice/IoU 및 운영 threshold와 validation 기반 모델 선택 규칙은 변경하지 않는다. Epoch별 CNN 모델 선택용 metric은 기존대로 유지한다.
+모든 Exp0–7/P0–5의 최종 validation/test 평가에 적용하고, protocol별 results.json/summary.csv/report.html 및 통합 index.html/summary.csv에 출력한다. 기존 auroc 키는 Image AUROC 호환용으로 유지한다. 최종 Recall/FPR/Worst Equipment FPR/Region Recall/Dice/IoU는 독립적인 image pred_label 및 pixel pred_mask로 계산한다. Epoch별 CNN 모델 선택용 metric은 기존대로 유지한다.
 
-pred_score는 native anomaly map의 max, pred_label은 validation에서 결정된 threshold 이상 여부, gt_label은 manifest label, gt_mask는 원본 binary mask이다. AUROC는 전체 split pixel 또는 image를 모아서 계산하며 이미지별 평균이 아니다. F1은 2TP/(2TP+FP+FN), 분모가 0이면 0. Pixel AUPRO는 각 이미지의 8-connected GT component에 동일한 총 weight를 부여하여 PRO(영역별 pixel overlap 평균) 대 pixel FPR 곡선을 계산한다. 모든 score tie를 함께 처리하며 FPR 0.30에서 선형 보간한 뒤 0~0.30 면적을 0.30으로 나눈다. GT positive 또는 negative가 없으면 해당 AUROC/AUPRO는 null(N/A). 새로운 의존성은 없다.
+anomalib validation/test hook의 흐름대로 Val AUROC는 raw native map 및 raw image score(map max)를 사용하고, Test pixel AUROC/AUPRO는 validation으로 정규화한 map, Test image F1은 정규화된 image score의 pred_label을 사용한다. gt_label은 manifest label, gt_mask는 원본 binary mask이다. AUROC는 전체 split pixel 또는 image를 모아서 계산하며 이미지별 평균이 아니다. F1은 2TP/(2TP+FP+FN), 분모가 0이면 0. Pixel AUPRO는 각 이미지의 8-connected GT component에 동일한 총 weight를 부여하여 PRO 대 pixel FPR 곡선을 계산한다. 모든 score tie를 함께 처리하며 FPR 0.30에서 선형 보간한 뒤 0~0.30 면적을 0.30으로 나눈다. GT positive 또는 negative가 없으면 해당 AUROC/AUPRO는 null(N/A).
 
-이 구현은 anomalib 클래스와 같은 입력 및 표준 지표 정의를 따르는 독립 구현이며 anomalib 버전별 AUPRO 구현, score normalization/clipping, image/pixel threshold, map 복원/보간, 연결성 차이까지 수치 일치가 보장되지는 않는다. 완전한 수치 비교에는 동일한 split, 해상도, score/label 생성 규칙, anomalib 버전과 설정으로 동일한 raw map을 교차 평가해야 한다. 참고: https://anomalib.readthedocs.io/en/stable/markdown/guides/reference/metrics/index.html
+이 구현은 anomalib 기본 후처리와 표준 지표 정의를 따르는 독립 구현이며, anomalib 버전별 F1 tie 처리/AUPRO 구현, map 복원/보간 등의 수치 일치가 보장되지는 않는다. 참조: [OneClassPostProcessor](https://github.com/open-edge-platform/anomalib/blob/main/src/anomalib/post_processing/one_class.py), [metrics](https://anomalib.readthedocs.io/en/stable/markdown/guides/reference/metrics/index.html). 기존 weight/전처리/threshold 방식으로 생성된 모델 및 결과와는 직접 수치 비교하지 말고 새로 Gaussian fit 및 평가를 수행한다.
 
 이전에 생성한 결과 JSON에는 새 지표가 없으므로 build_report.py로 HTML만 재생성하면 N/A로 표시된다. 새 평가 결과를 얻으려면 새 출력 경로로 실험을 실행한다. 픽셀 지표 계산은 전체 split 점수 정렬을 사용하므로 큰 데이터셋에서는 추가 CPU 메모리와 시간이 필요하다.

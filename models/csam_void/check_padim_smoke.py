@@ -34,6 +34,8 @@ def main():
             d=out/exp
             assert (d/"model.pt").is_file() and (d/"operating_points.json").is_file()
             model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
+            assert model["backbone_name"]=="resnet18.a1_in1k"
+            assert model["post_processor"]==r["post_processor"]==read(d/"threshold.json")
             assert torch.equal(model["channels"],ref["channels"])
             if exp!="p0_pretrained":
                 b=read(d/"backbone_summary.json")

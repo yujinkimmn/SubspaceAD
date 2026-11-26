@@ -28,10 +28,10 @@ jobs:
       - name: Generate synthetic dataset and local random backbone weights
         run: |
           python models/csam_void/make_demo.py --out /tmp/csam_demo
-          python -c "import torch; from torchvision.models import resnet18; torch.manual_seed(42); torch.save(resnet18(weights=None).state_dict(), '/tmp/csam_resnet18.pt')"
+          python -c "import torch, timm; torch.manual_seed(42); torch.save(timm.create_model('resnet18.a1_in1k', pretrained=False).state_dict(), '/tmp/csam_resnet18.pt')"
       - name: End-to-end smoke test (pooled and all holdouts)
         run: |
-          python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_results --epochs 2 --min-steps 2 --padim-size 64 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --experiments exp0_padim exp1_cnn exp2_normals exp3_hard_negative exp4_copy_paste exp5_domain_aug exp6_mixstyle
+          python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_results --epochs 2 --min-steps 2 --padim-size 64 --max-layer-depth 3 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --experiments exp0_padim exp1_cnn exp2_normals exp3_hard_negative exp4_copy_paste exp5_domain_aug exp6_mixstyle
           python models/csam_void/check_smoke.py /tmp/csam_results
       - name: P0-P5 backbone adaptation and P0 equivalence
         run: |

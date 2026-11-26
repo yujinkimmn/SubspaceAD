@@ -1,8 +1,11 @@
 import random
+import tempfile
 import unittest
+from pathlib import Path
 import numpy as np
 import torch
 from padim_backbone import CrossMix, preprocess, layers, consistency, batch_rows, operating_points
+from run import create_padim_backbone, padim_input, PADIM_BACKBONE
 
 class TestPadimBackbone(unittest.TestCase):
     def test_cross_mix_and_eval_identity(self):
@@ -25,10 +28,9 @@ class TestPadimBackbone(unittest.TestCase):
             self.assertEqual((t,l),((64-h)//2,(64-w)//2))
 
     def test_native_factor_four_and_depth_two(self):
-        from torchvision.models import resnet18
         from run import restore_padim_map
         from padim_backbone import LocalHead
-        net=resnet18(weights=None).eval()
+        net=create_padim_backbone(pretrained=False).eval()
         for shape in ((81,61),(61,81)):
             x=torch.ones(1,1,*shape)
             z,crop=preprocess(x,None,4)
@@ -44,6 +46,32 @@ class TestPadimBackbone(unittest.TestCase):
             peak=torch.zeros(1,1,*shape)
             peak[:,:,5,5]=1
             self.assertTrue(torch.equal(peak,restore_padim_map(peak,crop,shape,None,4)))
+
+    def test_transform_matches_original_dtype_resize_order(self):
+        from torchvision.transforms import v2
+        for dtype, maximum in ((np.uint8,255),(np.uint16,65535)):
+            raw=np.arange(61*81,dtype=np.int64).reshape(61,81)% (maximum+1)
+            raw=raw.astype(dtype)
+            expected=v2.Compose([v2.ToImage(),v2.Resize((244,324),antialias=True),
+                                 v2.ToDtype(torch.float32,scale=True)])(torch.from_numpy(raw[None]).repeat(3,1,1))
+            z,crop=preprocess([padim_input(dict(raw=raw,x=raw.astype(np.float32)/maximum))],None,4)
+            self.assertTrue(torch.equal(z[0],expected))
+            self.assertTrue((z>=0).all() and (z<=1).all())
+            self.assertEqual(crop,(0,0,244,324))
+
+    def test_timm_local_checkpoint(self):
+        net=create_padim_backbone(pretrained=False)
+        self.assertEqual(net.pretrained_cfg["architecture"],"resnet18")
+        self.assertEqual(net.pretrained_cfg["tag"],"a1_in1k")
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"a1_test.pth"
+            torch.save(net.state_dict(),path)
+            loaded=create_padim_backbone(path)
+            self.assertTrue(all(torch.equal(v,loaded.state_dict()[k]) for k,v in net.state_dict().items()))
+            old=Path(d)/"resnet18-f37072fd.pth"
+            old.write_bytes(b"test")
+            with self.assertRaisesRegex(ValueError,"not resnet18.a1_in1k"):
+                create_padim_backbone(old)
 
     def test_matched_sampling(self):
         rows=[dict(label=i%2,equipment="A" if i<5 else "B",id=i) for i in range(10)]

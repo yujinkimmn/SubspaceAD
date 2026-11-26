@@ -121,8 +121,8 @@ def tradeoff_section(results):
     if not any(r.get("operating_points") for r in results):
         return ""
     body=["<h3>Recall–FPR trade-off (validation-derived thresholds)</h3>",
-          "<p class='note'>All thresholds are derived from validation scores only and then applied unchanged to test. "
-          "Test curves are diagnostic, not threshold-selection tools. Missing region groups remain unavailable.</p>",
+          "<p class='note'>Diagnostic shared RAW thresholds are derived from validation scores only and applied unchanged to test. "
+          "They are separate from the final independently normalized image/pixel decisions. Test curves are diagnostic, not threshold-selection tools. Missing region groups remain unavailable.</p>",
           "<div class='charts'>"]
     for split in ("val","test"):
         for key,label in (("recall","image recall"),("region_1px","1px region recall"),("region_2_4px","2–4px region recall")):
@@ -203,8 +203,15 @@ def build_report(root,index=None):
         config_path=directory/"config.json"
         config=load_json(config_path) if config_path.is_file() else {}
         section.append(f"<p>Validation-selected model: <strong>{esc(best or 'None recorded')}</strong>. "
-                       f"Validation targets: image recall {percent(config.get('recall'))}, "
+                       f"Validation goals: image recall {percent(config.get('recall'))}, "
                        f"small-region recall {percent(config.get('region_recall'))}.</p>")
+        post=[r for r in results if r.get("post_processor")]
+        if post:
+            keys=("image_threshold","image_min","image_max","pixel_threshold","pixel_min","pixel_max")
+            section.append("<h3>Validation-calibrated post-processing</h3>"
+                           "<p class='note'>Independent image and pixel F1-adaptive thresholds; "
+                           "normalized predictions are > 0.5. Recall goals are not guaranteed by F1 calibration.</p>"+
+                           table(["Experiment",*keys], [([r["experiment"],*[numeric(r["post_processor"].get(k)) for k in keys]],r["experiment"]==best) for r in post]))
         if "padim_input_shape" in config:
             section.append(f"<p>PaDiM input (H,W): {esc(config['padim_input_shape'])}; "
                            f"upsample factor: {esc(config.get('upsample_factor') or 'square letterbox')}; "
