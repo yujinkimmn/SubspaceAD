@@ -67,7 +67,7 @@ Exp0은 기존 사내 PaDiM checkpoint와 동일한 구현이라는 보장이 �
 
 ## 4. 결과
 
-출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv, raw NPY, mask PNG, overlay PNG를 저장한다. overlay 빨강=예측, 초록=정답, 노랑=겹침. 결과에는 원본 경로 및 이미지 파생물이 있으니 사내 자료로 취급한다.
+출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv, raw NPY, mask PNG, overlay PNG를 저장한다. overlay 빨강=예측, 초록=정답, 노랑=겹침. 모든 val/test 이미지에 `<id>_panel.png` (Original | Anomaly map | Pred mask)도 저장한다. 원본 좌표의 세 패널을 동일한 4배 nearest-neighbor 배율로 표시한다. Heatmap 표시 범위는 실험별 validation threshold의 0~2배로 고정(0 이하 threshold는 0~1), 상한 초과값은 색상만 포화하며 raw NPY 및 예측 mask는 그대로 유지한다. Colorbar와 threshold/max score를 표시하고, pred mask는 흰색=불량, 검은색=배경이다. 결과에는 원본 경로 및 이미지 파생물이 있으니 사내 자료로 취급한다.
 
 Threshold는 validation에서 이미지 recall 및 존재하는 1px/2–4px 연결성분 recall 목표를 충족하는 가장 높은 값으로 고정. test에서 다시 조정하지 않는다. best checkpoint 및 추천 모델은 validation 기준(작은 영역 recall 미달 우선, worst-equipment FPR, 전체 FPR, Dice)으로 선택한다. Test는 독립 보고만 한다. size bin은 지름이 아니라 8-connected component의 pixel 면적이다. region recall은 최소 1px overlap으로 정의하고 Dice/IoU로 정밀도를 보완한다. 해당 결함 크기가 없으면 null이며 recall 충족을 입증하지 못한다. 운영 적용 전 충분한 신규 lot/설비 및 작은 Void 수량이 필요하다.
 
