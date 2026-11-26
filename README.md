@@ -8,6 +8,8 @@
 
 SubspaceAD의 소스, 벤치마크 스크립트, 데이터 준비 도구와 테스트는 모두 `models/subspacead/`에 있습니다. 기존 환경에서는 루트의 `python main.py`도 사용할 수 있습니다.
 
+각 모델은 별도 환경과 `requirements.txt`를 사용합니다. 루트의 `requirements.txt`는 SubspaceAD용입니다. CSAM/PaDiM 실험은 적합한 PyTorch/CUDA 환경에서 `python -m pip install -r models/csam_void/requirements.txt`로 설치하고 `python -m pip check`로 의존성 충돌을 확인하세요. NAGL은 [해당 모델의 설치 안내](models/nagl/README.md)를 따르세요.
+
 ## PaDiM pretrained checkpoint
 
 - Backbone: timm `resnet18.a1_in1k` (Exp0 / P0–P5)
