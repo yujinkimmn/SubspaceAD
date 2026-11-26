@@ -126,3 +126,22 @@ P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한
 `run_padim.py`의 기본값은 `--upsample-factor 4 --max-layer-depth 2 --n-features 40`이다. 예: native (H,W)=(81,61) → bilinear (324,244), padding 없음 → layer1 (64,81,61), layer2 (128,41,31) → nearest feature alignment → 192 channels 중 seed로 40개 선택 → 위치별 40차원 Gaussian. Fine-tuning head와 fixed teacher도 동일한 layer1/2만 사용하고, MixStyle은 stem 및 layer1 출력에서 다음 layer 입력에 적용한다. layer3/4 및 fc는 사용하지 않고 weight 변경하지 않는다. 입력 및 mask 방향을 유지한다. Factor 4에서 layer1 grid가 native와 같아 score map 및 P5 logits를 불필요하게 4배 확대 후 다시 축소하지 않는다. 다른 factor에서는 native shape로 bilinear 복원한다.
 
 옵션은 `--upsample-factor` / `--upsample_factor`, `--max-layer-depth` / `--max_layer_depth`, `--n-features` / `--n_features` / 기존 `--padim-dim`을 지원한다. `--padim-size 224`는 기존 square letterbox 방식 선택이며 factor와 동시 지정할 수 없다. depth 1/2/3에서 최대 channel 수는 64/192/448이다. 기존 `run.py`의 기본값은 기존대로 224 square, depth 3, 100 features이며 같은 Best 옵션을 명시해서 Exp0와 P0를 직접 비교할 수 있다. 저장된 `model.pt`에 geometry, layer depth, n_features, feature_shape 및 선택 channel index를 남긴다. 기존 사내 모델의 bilinear/normalization/feature selection/score smoothing까지 일치하는지는 별도 확인해야 한다.
+
+
+## 9. 기존 anomalib 실험과 평가 metric 통일
+
+| Split | Metric (JSON key) | 입력 |
+|---|---|---|
+| Validation | Image AUROC (`image_auroc`) | pred_score, gt_label |
+| Validation | Pixel AUROC (`pixel_auroc`) | anomaly_map, gt_mask |
+| Test | Image F1 (`image_f1`) | pred_label, gt_label |
+| Test | Pixel AUPRO@0.30 (`pixel_aupro`) | anomaly_map, gt_mask |
+| Test | Pixel AUROC (`pixel_auroc`) | anomaly_map, gt_mask |
+
+모든 Exp0–7/P0–5의 최종 validation/test 평가에 적용하고, protocol별 results.json/summary.csv/report.html 및 통합 index.html/summary.csv에 출력한다. 기존 auroc 키는 Image AUROC 호환용으로 유지한다. 실무용 Recall/FPR/Worst Equipment FPR/Region Recall/Dice/IoU 및 운영 threshold와 validation 기반 모델 선택 규칙은 변경하지 않는다. Epoch별 CNN 모델 선택용 metric은 기존대로 유지한다.
+
+pred_score는 native anomaly map의 max, pred_label은 validation에서 결정된 threshold 이상 여부, gt_label은 manifest label, gt_mask는 원본 binary mask이다. AUROC는 전체 split pixel 또는 image를 모아서 계산하며 이미지별 평균이 아니다. F1은 2TP/(2TP+FP+FN), 분모가 0이면 0. Pixel AUPRO는 각 이미지의 8-connected GT component에 동일한 총 weight를 부여하여 PRO(영역별 pixel overlap 평균) 대 pixel FPR 곡선을 계산한다. 모든 score tie를 함께 처리하며 FPR 0.30에서 선형 보간한 뒤 0~0.30 면적을 0.30으로 나눈다. GT positive 또는 negative가 없으면 해당 AUROC/AUPRO는 null(N/A). 새로운 의존성은 없다.
+
+이 구현은 anomalib 클래스와 같은 입력 및 표준 지표 정의를 따르는 독립 구현이며 anomalib 버전별 AUPRO 구현, score normalization/clipping, image/pixel threshold, map 복원/보간, 연결성 차이까지 수치 일치가 보장되지는 않는다. 완전한 수치 비교에는 동일한 split, 해상도, score/label 생성 규칙, anomalib 버전과 설정으로 동일한 raw map을 교차 평가해야 한다. 참고: https://anomalib.readthedocs.io/en/stable/markdown/guides/reference/metrics/index.html
+
+이전에 생성한 결과 JSON에는 새 지표가 없으므로 build_report.py로 HTML만 재생성하면 N/A로 표시된다. 새 평가 결과를 얻으려면 새 출력 경로로 실험을 실행한다. 픽셀 지표 계산은 전체 split 점수 정렬을 사용하므로 큰 데이터셋에서는 추가 CPU 메모리와 시간이 필요하다.
