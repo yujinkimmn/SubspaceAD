@@ -33,6 +33,10 @@ jobs:
         run: |
           python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_results --epochs 2 --min-steps 2 --padim-size 64 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --experiments exp0_padim exp1_cnn exp2_normals exp3_hard_negative exp4_copy_paste exp5_domain_aug exp6_mixstyle
           python models/csam_void/check_smoke.py /tmp/csam_results
+      - name: P0-P5 backbone adaptation and P0 equivalence
+        run: |
+          python models/csam_void/run_padim.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_padim --epochs 1 --min-steps 2 --padim-size 64 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --mix-prob 1
+          python models/csam_void/check_padim_smoke.py /tmp/csam_padim --baseline /tmp/csam_results
       - name: Semi-supervised smoke test
         run: |
           python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_semi --epochs 4 --min-steps 4 --protocol pooled --device cpu --experiments exp7_semi || test "$?" -eq 2
