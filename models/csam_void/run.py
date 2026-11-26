@@ -531,9 +531,7 @@ class SkipExperiment(Exception):
 
 def save_panel(x, score, threshold, path):
     """Three aligned native-coordinate views, with a fixed threshold-relative heat scale."""
-    scale = 4
     h, w = x.shape
-    size = (w * scale, h * scale)
     # Keep raw scores and the actual mask independent of heatmap display clipping.
     vmax = 2 * float(threshold) if threshold > 0 else 1.0
     anchors = np.array([[0, 0, 96], [0, 155, 255], [255, 230, 0], [220, 0, 0]], dtype=np.float32)
@@ -546,13 +544,13 @@ def save_panel(x, score, threshold, path):
     panels = [Image.fromarray(original).convert("RGB"), Image.fromarray(heat(score)),
               Image.fromarray(mask).convert("RGB")]
     gap, margin, top, footer = 12, 12, 32, 64
-    pw, ph = size
+    pw, ph = w, h
     canvas = Image.new("RGB", (2 * margin + 3 * pw + 2 * gap, top + ph + footer), "white")
     draw = ImageDraw.Draw(canvas)
     for i, (title, panel) in enumerate(zip(("Original", "Anomaly map", "Pred mask"), panels)):
         left = margin + i * (pw + gap)
-        draw.text((left, 10), title, fill="black")
-        canvas.paste(panel.resize(size, Image.Resampling.NEAREST), (left, top))
+        draw.text((left + pw // 2, 10), title, anchor="mt", fill="black")
+        canvas.paste(panel, (left, top))
     left, y = margin + pw + gap, top + ph + 7
     bar = heat(np.linspace(0, vmax, pw, dtype=np.float64)[None, :])
     canvas.paste(Image.fromarray(bar).resize((pw, 9), Image.Resampling.NEAREST), (left, y))
@@ -560,8 +558,8 @@ def save_panel(x, score, threshold, path):
     draw.line((tick, y - 2, tick, y + 12), fill="black", width=1)
     draw.text((left, y + 15), "0", fill="black")
     draw.text((left + pw, y + 15), f"{vmax:.3g}+", anchor="ra", fill="black")
-    draw.text((left, y + 31), f"Threshold: {threshold:.3g} | Max: {score.max():.3g}", fill="black")
-    draw.text((margin + 2 * (pw + gap), y + 7), "White = predicted defect", fill="black")
+    draw.text((margin, y + 30), f"Threshold: {threshold:.3g} | Max: {score.max():.3g}", fill="black")
+    draw.text((margin, y + 44), "White = predicted defect", fill="black")
     canvas.save(path)
 
 
