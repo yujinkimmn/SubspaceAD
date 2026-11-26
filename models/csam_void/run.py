@@ -13,7 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score
 import torch
@@ -529,6 +529,42 @@ class Padim:
 class SkipExperiment(Exception):
     pass
 
+def save_panel(x, score, threshold, path):
+    """Three aligned native-coordinate views, with a fixed threshold-relative heat scale."""
+    scale = 4
+    h, w = x.shape
+    size = (w * scale, h * scale)
+    # Keep raw scores and the actual mask independent of heatmap display clipping.
+    vmax = 2 * float(threshold) if threshold > 0 else 1.0
+    anchors = np.array([[0, 0, 96], [0, 155, 255], [255, 230, 0], [220, 0, 0]], dtype=np.float32)
+    def heat(values):
+        t = np.clip(values / vmax, 0, 1)
+        return np.stack([np.interp(t, np.linspace(0, 1, len(anchors)), anchors[:, c])
+                         for c in range(3)], axis=-1).astype(np.uint8)
+    original = (np.clip(x, 0, 1) * 255).astype(np.uint8)
+    mask = ((score >= threshold) * 255).astype(np.uint8)
+    panels = [Image.fromarray(original).convert("RGB"), Image.fromarray(heat(score)),
+              Image.fromarray(mask).convert("RGB")]
+    gap, margin, top, footer = 12, 12, 32, 64
+    pw, ph = size
+    canvas = Image.new("RGB", (2 * margin + 3 * pw + 2 * gap, top + ph + footer), "white")
+    draw = ImageDraw.Draw(canvas)
+    for i, (title, panel) in enumerate(zip(("Original", "Anomaly map", "Pred mask"), panels)):
+        left = margin + i * (pw + gap)
+        draw.text((left, 10), title, fill="black")
+        canvas.paste(panel.resize(size, Image.Resampling.NEAREST), (left, top))
+    left, y = margin + pw + gap, top + ph + 7
+    bar = heat(np.linspace(0, vmax, pw, dtype=np.float64)[None, :])
+    canvas.paste(Image.fromarray(bar).resize((pw, 9), Image.Resampling.NEAREST), (left, y))
+    tick = left + round(np.clip(threshold / vmax, 0, 1) * (pw - 1))
+    draw.line((tick, y - 2, tick, y + 12), fill="black", width=1)
+    draw.text((left, y + 15), "0", fill="black")
+    draw.text((left + pw, y + 15), f"{vmax:.3g}+", anchor="ra", fill="black")
+    draw.text((left, y + 31), f"Threshold: {threshold:.3g} | Max: {score.max():.3g}", fill="black")
+    draw.text((margin + 2 * (pw + gap), y + 7), "White = predicted defect", fill="black")
+    canvas.save(path)
+
+
 def save_eval(rows,maps,th,out,split):
     dest=out/split
     dest.mkdir(exist_ok=True)
@@ -541,6 +577,7 @@ def save_eval(rows,maps,th,out,split):
             writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(m.max()),flag])
             np.save(dest/(r["id"]+".npy"),m)
             Image.fromarray(((m>=th)*255).astype(np.uint8)).save(dest/(r["id"]+"_mask.png"))
+            save_panel(r["x"], m, th, dest/(r["id"]+"_panel.png"))
             if flag or r["label"]==1:
                 rgb=np.repeat((r["x"]*255).astype(np.uint8)[...,None],3,axis=2)
                 rgb[m>=th]=[255,65,65]
@@ -584,7 +621,7 @@ def report(results,out,args):
         for s in ("val","test"):
             for eq,m in r[s]["by_equipment"].items():
                 body.append("<tr>"+"".join(f"<td>{esc(v)}</td>" for v in (s,eq,m["fp"],m["fn"],m["fpr"],m["recall"],m["dice"]))+"</tr>")
-        body.append(f"</table><p><a href='{name}/test/scores.csv'>Test scores</a> | <a href='{name}/test/'>Maps and overlays</a></p>")
+        body.append(f"</table><p><a href='{name}/test/scores.csv'>Test scores</a> | <a href='{name}/test/'>Maps, masks and panels</a></p>")
     (out/"report.html").write_text("\n".join(body),encoding="utf-8")
     (out/"selected.json").write_text(json.dumps({"selected_by_validation":best},indent=2),encoding="utf-8")
 
@@ -624,7 +661,7 @@ def run_protocol(parts,args,device,out):
                 raise ValueError("Nonfinite predictions")
             val,test=metrics(parts["val"],vm,th),metrics(parts["test"],tm,th)
             (dest/"threshold.json").write_text(json.dumps({"threshold":th,"source":"validation"}),encoding="utf-8")
-            LOG.info("[Save] val/test maps, masks, overlays and CSV")
+            LOG.info("[Save] val/test maps, masks, overlays, 3-panel PNGs and CSV")
             save_eval(parts["val"],vm,th,dest,"val")
             save_eval(parts["test"],tm,th,dest,"test")
             result=dict(experiment=exp,status="ok",threshold=th,val=val,test=test)
