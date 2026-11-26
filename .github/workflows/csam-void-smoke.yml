@@ -24,7 +24,7 @@ jobs:
           python -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r models/csam_void/requirements.txt
       - name: Unit tests
-        run: python -m unittest discover -s models/csam_void -p test_run.py -v
+        run: python -m unittest discover -s models/csam_void -p 'test_*.py' -v
       - name: Generate synthetic dataset and local random backbone weights
         run: |
           python models/csam_void/make_demo.py --out /tmp/csam_demo

@@ -88,3 +88,13 @@ CI: `.github/workflows/csam-void-smoke.yml`은 CPU 합성 데이터에서 pooled
 실행 명령은 그대로 유지한다. 콘솔과 출력 루트의 `run.log`에 동일한 로그를 남긴다. 각 protocol의 설비별 normal/void/unlabeled/lot 수량, 현재 실험, epoch, batch, 평균 loss, validation recall/FPR/worst FPR/Dice/IoU/크기별 region recall, threshold, best 갱신, 경과 시간 및 ETA를 표시한다. CUDA 메모리는 PyTorch allocated/reserved/peak allocated와 GPU 전체 용량(MiB)이며 전체 시스템 GPU 사용량이나 GPU utilization(%)이 아니다. `--log-every 50`은 기본 batch 출력 간격이며 `--log-every 10`으로 더 자주 출력, `--log-every 0`은 batch 로그만 끈다. Epoch 로그는 계속 출력된다. ETA는 완료된 작업의 평균으로 계산하며 실험별 소요시간 차이 때문에 protocol ETA는 거친 추정치이다. PaDiM은 epoch 없이 정상 feature 집계와 covariance 계산을 표시한다.
 
 `[Aug]`는 해당 epoch의 성공/시도 copy-paste 횟수, supervised domain augmentation 샘플 수, MixStyle 호출 횟수(실제 적용, Exp7의 student unlabeled forward 포함), accepted positive pseudo pixel 수를 보여준다. 같은 이미지를 반복 sampling할 수 있으므로 독립 이미지 수가 아니다. `history.json`은 epoch마다 업데이트되어 학습 중에도 읽을 수 있으며 best_epoch, best_updated, seconds 및 augmentation count가 추가되었다. Exp7이 pseudo label 부족으로 skip되어도 진행된 epoch의 history가 남는다. 학습 재개 기능은 제공하지 않는다. 데이터 audit 실패도 run.log에 남기므로 재시도 시 새로운 --out 경로를 사용한다. 로그와 결과에는 사내 데이터 경로·설비 식별자가 포함될 수 있으므로 GitHub로 올리지 않는다.
+
+## 7. 독립형 통합 보고서 (오프라인)
+
+전체 실험 완료 시 출력 루트에 `index.html`과 통합 `summary.csv`를 자동 생성한다. index.html 하나만 다른 PC로 복사해도 모든 protocol/실험의 validation·test 지표, validation-selected 모델, holdout 비교, 설비별 상세 지표, region hit/count, 0–100% 비교 막대그래프를 볼 수 있다. HTML/CSS가 내장되어 인터넷이나 Python, 다른 HTML 파일이 필요 없다. Test로 모델을 재선택하지 않는다. 실험 상태/오류 및 N/A도 그대로 표시한다. 통합 CSV는 overall/equipment scope와 split을 구분하고, 기존 하위 폴더의 summary.csv와 report.html은 유지한다.
+
+기존 완료 결과에서 재학습 없이 통합 보고서 생성 (Python 표준 라이브러리만 사용):
+
+    python models/csam_void/build_report.py --root D:/csam_results/run01
+
+기존 출력 루트의 index.json, 각 완료 protocol의 results.json 및 selected.json, config.json(선택 기준·목표 표시)이 필요하다. 기존 하위 report.html이 없어도 성능 수치는 생성된다. 결과 JSON이 누락되면 해당 protocol에 missing 안내를 표시한다. 기존 index.html 및 루트 summary.csv는 새 버전으로 교체된다. 원본 이미지/overlay/개별 scores.csv는 HTML에 내장하지 않으므로 필요할 때만 원래 하위 폴더를 함께 복사한다. 설비명과 성능 수치도 사내 보안 정책에 따라 취급한다.
