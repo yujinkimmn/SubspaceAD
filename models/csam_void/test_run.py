@@ -1,7 +1,10 @@
 import unittest
+import tempfile
+from pathlib import Path
+from PIL import Image
 import numpy as np
 import torch
-from run import VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W
+from run import VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W, save_panel
 
 class TestCSAM(unittest.TestCase):
     def test_native_shape_and_grad(self):
@@ -31,6 +34,29 @@ class TestCSAM(unittest.TestCase):
         m=metrics(rows,maps,th)
         self.assertEqual(m["regions"]["1px"]["recall"],1)
         self.assertEqual(m["fpr"],1)
+    def test_three_panel_native_mask_and_fixed_heat_scale(self):
+        for h, w in ((61, 81), (81, 61)):
+            x = np.full((h, w), .3, np.float32)
+            score = np.zeros_like(x)
+            score[10, 20] = .6
+            score[11, 21] = .3
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "panel.png"
+                save_panel(x, score, .5, p)
+                with Image.open(p) as image:
+                    a = np.asarray(image)
+                self.assertEqual(a.shape, (h*4+96, w*12+48, 3))
+                left, top = 12+2*(w*4+12), 32
+                mask = a[top:top+h*4, left:left+w*4, 0]
+                np.testing.assert_array_equal(mask[::4, ::4], (score>=.5)*255)
+                p2 = Path(d) / "panel2.png"
+                score[0, 0] = 99
+                save_panel(x, score, .5, p2)
+                with Image.open(p2) as image:
+                    b = np.asarray(image)
+                cx, cy = 12+w*4+12+20*4, top+10*4
+                np.testing.assert_array_equal(a[cy,cx], b[cy,cx])
+
     def test_copy_paste(self):
         x=np.full((H,W),.3,np.float32)
         y=np.zeros_like(x)
