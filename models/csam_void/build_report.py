@@ -391,6 +391,7 @@ def build_report(root,index=None):
              "<nav><a href='#read-guide'>읽는 법</a><a href='#overview'>선정 모델 요약</a>"
              "<a href='#metric-guide'>지표 사전</a>",
              "<a href='#padim-guide'>P0–P5 실험 설명</a>" if is_padim_suite else "",
+             "<a href='comparison.html'>P0 대비 정성·정량 비교</a>" if (root/"comparison.html").is_file() else "",
              "".join(nav),"</nav>",reading_guide(),"<section id='overview'><h2>Protocol overview · validation-selected models</h2>"
              "<p>각 평가 조건에서 validation으로 선택된 모델의 test 결과이다. 아래 실험별 표에서 다른 후보도 확인한다.</p>",
              table(["Protocol / equipment","Status","Selected model","Test FPR","Test recall","Test Dice",

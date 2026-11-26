@@ -39,6 +39,8 @@ def main():
         config=json.loads((directory/"config.json").read_text())
         audit=json.loads((directory/"split_audit.json").read_text())
         h,w=config["native_shape"]
+        scale=config.get("panel_scale",1)
+        ph,pw=h*scale,w*scale
         results=json.loads((directory/"results.json").read_text())
         assert {r["experiment"] for r in results}==expected, results
         assert (directory/"report.html").is_file()
@@ -77,10 +79,12 @@ def main():
                     assert int(rec["prediction"])==int(float(rec["score"])>.5)
                     with Image.open(d/split/(rec["id"]+"_panel.png")) as im:
                         panel=np.asarray(im)
-                    top=panel.shape[0]-h-64
-                    left=12+2*(w+12)
-                    assert top>32 and panel.shape[1]>=3*w+48
-                    mask=panel[top:top+h,left:left+w,0]
+                    top=panel.shape[0]-ph-64
+                    left=12+2*(pw+12)
+                    assert top>32 and panel.shape[1]>=3*pw+48
+                    enlarged_mask=panel[top:top+ph,left:left+pw,0]
+                    mask=enlarged_mask[::scale,::scale]
+                    np.testing.assert_array_equal(enlarged_mask,np.repeat(np.repeat(mask,scale,axis=0),scale,axis=1))
                     assert np.isin(mask,[0,255]).all()
                     if diagnostic_maps:
                         assert float(rec["score"])==float(scores[i]) and int(rec["prediction"])==int(labels[i])

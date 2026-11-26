@@ -69,7 +69,7 @@ Exp0 및 P0–P5의 기본은 기존 프로젝트와 같은 원본 H/W 각각 4�
 
 ## 4. 결과
 
-출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv를 유지한다. CSV의 `score`는 정규화된 image score, `raw_score`는 원본 image score, `prediction`은 image pred_label이며 `wafer`도 기록한다. 각 val/test 이미지에 시각화 파일은 `<id>_panel.png` (Original | Anomaly map | Pred mask) 하나만 저장한다. 상단에 Lot, Wafer, Equipment, GT label(NORMAL/VOID) 및 GT pixel 수, image prediction/score를 표시한다. 각 패널은 확대 및 보간 없이 원본 해상도(61×81 또는 81×61, H×W) 그대로 배치하며 긴 metadata에는 캔버스만 확장한다. Heatmap은 정규화 anomaly map에 OpenCV `COLORMAP_JET`을 적용하며 표시 범위는 항상 [0,1]이다(이미지별 재정규화 없음). Colorbar와 threshold/max score 표시, pred mask는 흰색=불량, 검은색=배경이다. 별도 mask/overlay PNG와 NPY는 기본 저장하지 않는다. 수치 검증이 필요할 때만 `--save-raw-maps`를 지정해 `<id>.npy`, `<id>_normalized.npy`를 추가 저장한다. 결과에는 원본 경로 및 lot/wafer/설비 정보와 이미지 파생물이 있으니 사내 자료로 취급한다.
+출력 경로의 index.html을 브라우저에서 연다. pooled 및 각 holdout report.html, summary.csv, results.json, selected.json, split_audit.json, config.json을 생성한다. 모델별 model.pt, threshold.json, history.json(CNN), val/test scores.csv를 유지한다. CSV의 `score`는 정규화된 image score, `raw_score`는 원본 image score, `prediction`은 image pred_label이며 `wafer`도 기록한다. 각 val/test 이미지에 시각화 파일은 `<id>_panel.png` (Original | Anomaly map | Pred mask) 하나만 저장한다. 상단에 Lot, Wafer, Equipment, GT label(NORMAL/VOID) 및 GT pixel 수, image prediction/score를 표시한다. 각 패널은 기본 4배 정수 확대(Nearest Neighbor)로 배치한다. 원본 61×81이면 각 패널은 244×324 (H×W)가 되며, 원본 pixel 하나가 동일한 색의 4×4 블록으로 표시된다. `--panel-scale 1`은 원래 크기, `--panel-scale 6`은 더 큰 표시 크기이다(1–16). 가로세로 비율·위치·score·mask 및 native 해상도 metric은 그대로이고 blur/색 보간은 없다. 긴 metadata에는 캔버스만 확장한다. Heatmap은 정규화 anomaly map에 OpenCV `COLORMAP_JET`을 적용하며 표시 범위는 항상 [0,1]이다(이미지별 재정규화 없음). Colorbar와 threshold/max score 표시, pred mask는 흰색=불량, 검은색=배경이다. 별도 mask/overlay PNG와 NPY는 기본 저장하지 않는다. 수치 검증이 필요할 때만 `--save-raw-maps`를 지정해 `<id>.npy`, `<id>_normalized.npy`를 추가 저장한다. 결과에는 원본 경로 및 lot/wafer/설비 정보와 이미지 파생물이 있으니 사내 자료로 취급한다.
 
 최종 threshold는 anomalib `OneClassPostProcessor`의 기본 방식에 맞춰 validation에서 image/pixel 각각 F1-adaptive threshold 및 min/max를 계산한다. `threshold.json`과 `model.pt['post_processor']`에 `image_threshold`, `image_min`, `image_max`, `pixel_threshold`, `pixel_min`, `pixel_max`를 저장한다. 각각 `clip((x - threshold) / (max - min) + 0.5, 0, 1)`로 정규화하며, 정규화된 image score > 0.5로 pred_label, normalized map > 0.5로 pred_mask를 독립 생성한다. Test에서 파라미터를 재계산하지 않는다. max=min인 경우 threshold와의 비교로 0/0.5/1을 반환하여 NaN을 방지한다. F1-adaptive threshold에서는 기존 recall 목표 충족이 보장되지 않는다. CNN의 epoch별 checkpoint 선택은 이전 recall 기반 방식을 유지하고, 최종 추천 모델 역시 validation의 작은 영역 recall 미달, worst-equipment FPR, 전체 FPR, Dice 순으로 선택한다. Test는 독립 보고만 한다. Region은 8-connected component의 pixel 면적이며 hit는 최소 1px overlap이다.
 
@@ -124,6 +124,7 @@ P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한
 
 - 기존 image recall 95%, 1px/2–4px region recall 90% 목표는 참고한다. F1-adaptive 최종 평가와 별도로 기존 raw score 기반 validation-only 공통 threshold sweep 및 image-only recall/FPR ceiling operating points를 저장해 threshold 문제와 표현력 문제를 구분한다. 이 raw 진단 threshold는 정규화된 최종 0.5와 다른 스케일이다. Test는 validation에서 정한 threshold 그대로 평가한다.
 - `index.html`: 단독 열람 가능한 통합 지표, val/test Recall–FPR curves 및 operating points, backbone proxy 및 실제 weight 변화량. `summary.csv`: 전체 protocol/설비 수치. 각 실험 `model.pt`: PaDiM stats + backbone; P1–P5 `backbone.pt`, `history.json`, `backbone_summary.json`; P0–P5 `operating_points.json`, val/test 3-panel PNG와 scores.csv.
+- `comparison.html`: P0 대비 P1–P5의 동일 test 이미지/GT 영역 기반 정량·정성 비교. 학습 실행 종료 시 자동 생성되고 `index.html`에서 이동할 수 있다.
 - 빠른 확인: `--protocol pooled --epochs 2`. 일부 실험: `--experiments p0_pretrained p3_consistency p4_consistency_mixstyle`. 기본 batch 8, `--backbone-lr`, `--head-lr`, `--mix-prob`, `--mix-alpha`, `--pixel-weight`, `--anchor-weight` 조절 가능. 기존 `--padim-size`, `--padim-dim`, `--padim-smooth`, `--log-every` 동일.
 - P0는 같은 geometry/depth/dim을 지정하면 이 저장소의 Exp0 구현과 동일하며 사내 배포 PaDiM 설정과 동일하다는 보장은 없다. 실제 production 설정이 다르면 비교 전에 일치시킨다. 설비별 blur/PSF 차이는 MixStyle 통계 혼합만으로 해결되지 않을 수 있다. 정상 feature distillation도 실제 void 신호를 보존한다는 보장은 없다. 합성 CPU smoke는 실행 검증이며 실제 CSAM 성능 검증이 아니다.
 
@@ -133,6 +134,24 @@ P1/P2 및 P3/P4는 matched ablation pair다. P5는 P2에 pixel loss를 추가한
 
 옵션은 `--upsample-factor` / `--upsample_factor`, `--max-layer-depth` / `--max_layer_depth`, `--n-features` / `--n_features` / 기존 `--padim-dim`을 지원한다. `--padim-size 224`는 기존 square letterbox 방식 선택이며 factor와 동시 지정할 수 없다. depth 1/2/3에서 최대 channel 수는 64/192/448이다. 현재 `run.py`의 Exp0도 동일하게 4배, depth 2, 40 features를 기본 사용하므로 동일한 입력/seed/가중치 설정에서 P0와 직접 비교할 수 있다. 저장된 `model.pt`에 geometry, layer depth, n_features, feature_shape 및 선택 channel index를 남긴다. 기존 사내 모델의 bilinear/normalization/feature selection/score smoothing까지 일치하는지는 별도 확인해야 한다.
 
+
+### P0 대비 개선 효과 보고서 (comparison.html)
+
+P0–P5 실행이 끝나면 출력 루트에 `comparison.html`을 자동 생성한다. 매 protocol에서 P0와 완료된 각 후보를 비교하며, P0 미실행/실패 또는 후보 실패 시 수치를 추정하지 않고 이유를 표시한다. Pooled와 holdout은 별도이다.
+
+- **Void 검출 유지:** 동일 GT 8-connected component에서 P0와 후보의 pred_mask overlap을 비교한다. 유지, 유실, 신규 검출, 둘 다 놓침과 P0 검출 영역 유지율을 원본 1px/2–4px/5+px별로 제공한다. 전체 recall이 같더라도 기존 영역의 유실을 발견할 수 있다.
+- **Background overkill:** 정상 이미지 FPR 및 정상 복구/신규 과검출 수, GT 외부 pixel FPR(전체/정상/void 배경), validation-normalized background score 평균·분포, 설비별 FPR 최댓값과 범위를 비교한다. 모델마다 calibration이 다르므로 score 분포는 raw distance 변화와 동일하지 않다. 별도로 validation recall/FPR 목표에서의 raw-threshold operating point도 비교한다.
+- **정성 평가:** 기존 void 유지 + background FP 감소, P0 검출 영역 유실, 신규 검출, 정상 과검출 완화, background 악화 사례를 자동 분류한다. 동일 이미지의 P0/후보 3-panel과 변화량을 함께 표시하고 각 분류의 전체 수를 기록한다. 기본 최대 2장/분류/비교이며 선택 이미지가 HTML에 내장되어 단독 열람 가능하다.
+
+Test map이 메모리에 있을 때 `comparison_stats.json`을 각 모델 폴더에 저장한다. 원본 이미지/GT fingerprint와 region overlap, 배경 pixel 집계이며 raw map/mask를 추가 저장하지 않는다. 실제 원본 pixel grid에서 계산하므로 `--panel-scale`의 영향을 받지 않는다. 같은 ID라도 원본/GT가 다르면 비교를 거부한다.
+
+기존 **이 버전에서 실행한** 결과는 학습 없이 재생성할 수 있다:
+
+    python models/csam_void/build_comparison_report.py --root D:/csam_results/padim01
+
+대표 사례 수를 변경하려면 `--examples-per-category 3`을 지정한다(0–10). 이전 버전에서 생성한 결과 중 `comparison_stats.json`이 없는 경우 정확한 region/pixel 비교는 지원하지 않으며, 같은 test set의 inference를 다시 수행해 통계를 확보해야 한다. 3-panel을 역변환하여 수치를 추정하지 않는다.
+
+`comparison.html`은 실제 이미지와 메타데이터를 포함하는 사내 보고서이므로 외부에 업로드하지 않는다.
 
 ## 9. 기존 anomalib 실험과 평가 metric 통일
 

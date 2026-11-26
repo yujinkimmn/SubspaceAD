@@ -13,7 +13,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
+from visualization import jet_heatmap, panel_metadata_lines, save_panel
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
 import torch
@@ -637,76 +638,17 @@ class Padim:
 class SkipExperiment(Exception):
     pass
 
-def jet_heatmap(values):
-    import cv2
-    bgr = cv2.applyColorMap((np.clip(values,0,1)*255).astype(np.uint8),cv2.COLORMAP_JET)
-    return cv2.cvtColor(bgr,cv2.COLOR_BGR2RGB)
-
-def panel_metadata_lines(row, prediction=None, image_score=None):
-    """Build display-only labels from the original manifest row and ground-truth mask."""
-    def display(key):
-        value = " ".join(str(row.get(key) or "").splitlines()).strip()
-        return value or "N/A"
-
-    label = int(row["label"])
-    gt = {0: "NORMAL (0)", 1: "VOID (1)", -1: "UNLABELED (-1)"}[label]
-    gt_pixels = int(np.count_nonzero(row["y"] > 0))
-    lines = [f"Lot: {display('lot')}", f"Wafer: {display('wafer')}",
-             f"Equipment: {display('equipment')}", f"GT: {gt} | GT pixels: {gt_pixels}"]
-    if prediction is not None:
-        predicted = "VOID (1)" if prediction else "NORMAL (0)"
-        line = f"Image prediction: {predicted}"
-        if image_score is not None:
-            line += f" | Score: {float(image_score):.3g}"
-        lines.append(line)
-    return lines
-
-
-def save_panel(x, score, threshold, path, metadata=None):
-    """Three native-coordinate views with optional metadata above the unchanged panels."""
-    h, w = x.shape
-    original = (np.clip(x, 0, 1) * 255).astype(np.uint8)
-    mask = ((score > threshold) * 255).astype(np.uint8)
-    panels = [Image.fromarray(original).convert("RGB"), Image.fromarray(jet_heatmap(score)),
-              Image.fromarray(mask).convert("RGB")]
-    gap, margin, footer = 12, 12, 64
-    pw, ph = w, h
-    width = 2 * margin + 3 * pw + 2 * gap
-    lines = list(metadata or ())
-    header_height = 0
-    if lines:
-        # Grow only the annotation canvas, never resize the image panels.
-        probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-        bounds = [probe.textbbox((0, 0), text, anchor="lt") for text in lines]
-        line_height = max(16, max(b[3] - b[1] for b in bounds) + 4)
-        header_height = 8 + len(lines) * line_height
-        width = max(width, 2 * margin + max(b[2] for b in bounds))
-    top = 32 + header_height
-    canvas = Image.new("RGB", (width, top + ph + footer), "white")
-    draw = ImageDraw.Draw(canvas)
-    for i, text in enumerate(lines):
-        draw.text((margin, 6 + i * line_height), text, anchor="lt", fill="black")
-    for i, (title, panel) in enumerate(zip(("Original", "Anomaly map", "Pred mask"), panels)):
-        left = margin + i * (pw + gap)
-        draw.text((left + pw // 2, 10 + header_height), title, anchor="mt", fill="black")
-        canvas.paste(panel, (left, top))
-    left, y = margin + pw + gap, top + ph + 7
-    bar = jet_heatmap(np.linspace(0, 1, pw, dtype=np.float64)[None, :])
-    canvas.paste(Image.fromarray(bar).resize((pw, 9), Image.Resampling.NEAREST), (left, y))
-    tick = left + round(np.clip(threshold, 0, 1) * (pw - 1))
-    draw.line((tick, y - 2, tick, y + 12), fill="black", width=1)
-    draw.text((left, y + 15), "0", fill="black")
-    draw.text((left + pw, y + 15), "1", anchor="ra", fill="black")
-    draw.text((margin, y + 30), f"Threshold: {threshold:.3g} | Max: {score.max():.3g}", fill="black")
-    draw.text((margin, y + 44), "White = predicted defect", fill="black")
-    canvas.save(path)
-
-
-def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False):
+def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_scale=4,
+              collect_comparison=False):
     dest=out/split
     dest.mkdir(exist_ok=True)
     scores, normalized, pred_labels, _=post_process(maps,calibration)
     # Save a single visual artifact per image. Numeric maps are opt-in for diagnostics.
+    evidence = []
+    if collect_comparison:
+        if split != "test":
+            raise ValueError("Paired comparison evidence is test-only")
+        from comparison_metrics import sample_evidence, write_evidence
     with (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
         writer=csv.writer(f)
         writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer"])
@@ -716,7 +658,11 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False):
                 np.save(dest/(r["id"]+".npy"),m)
                 np.save(dest/(r["id"]+"_normalized.npy"),norm)
             save_panel(r["x"],norm,NORMALIZED_THRESHOLD,dest/(r["id"]+"_panel.png"),
-                       metadata=panel_metadata_lines(r, flag, score))
+                       metadata=panel_metadata_lines(r, flag, score), scale=panel_scale)
+            if collect_comparison:
+                evidence.append(sample_evidence(r, norm, flag, NORMALIZED_THRESHOLD))
+    if collect_comparison:
+        write_evidence(out/"comparison_stats.json", evidence)
 
 def report(results,out,args):
     (out/"results.json").write_text(json.dumps(results,indent=2,allow_nan=False),encoding="utf-8")
@@ -806,8 +752,10 @@ def run_protocol(parts,args,device,out):
                 raise ValueError("Nonfinite predictions")
             val,test=metrics(parts["val"],vm,th,"val",calibration),metrics(parts["test"],tm,th,"test",calibration)
             LOG.info("[Save] val/test 3-panel PNGs and CSV%s", " + diagnostic NPY maps" if args.save_raw_maps else "")
-            save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps)
-            save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps)
+            save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps,
+                      panel_scale=args.panel_scale)
+            save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps,
+                      panel_scale=args.panel_scale, collect_comparison=getattr(args,"padim_suite",False))
             result=dict(experiment=exp,status="ok",threshold=th,post_processor=calibration,val=val,test=test)
             if getattr(args,"padim_suite",False):
                 from padim_backbone import operating_points
@@ -871,6 +819,7 @@ def main(padim_suite=False):
     p.add_argument("--padim-smooth",type=float,default=0.)
     p.add_argument("--padim-weights",help="Official local timm resnet18.a1_in1k checkpoint (.safetensors or .pth/.bin); otherwise download it via timm")
     p.add_argument("--save-raw-maps",action="store_true",help="Optionally save raw and normalized .npy maps for numerical diagnostics; default saves only 3-panel PNGs and scores.csv per split")
+    p.add_argument("--panel-scale",type=int,default=4,help="Integer display enlargement (1-16), nearest-neighbor; metrics remain at native resolution")
     p.add_argument("--experiments",nargs="+",choices=choices,default=choices)
     if padim_suite:
         p.add_argument("--backbone-lr",type=float,default=1e-5)
@@ -896,6 +845,8 @@ def main(padim_suite=False):
         p.error("P0-P5 require --padim-weights with the local timm resnet18.a1_in1k checkpoint (same starting weights for all runs)")
     if args.log_every < 0:
         p.error("--log-every must be >= 0")
+    if not 1 <= args.panel_scale <= 16:
+        p.error("--panel-scale must be an integer from 1 to 16")
     root=Path(args.out)
     root.mkdir(parents=True,exist_ok=False)
     setup_logging(root)
@@ -933,6 +884,10 @@ def main(padim_suite=False):
         index.append(dict(protocol=name,equipment=eq,status=status))
     (root/"index.json").write_text(json.dumps(index,indent=2),encoding="utf-8")
     from build_report import build_report
+    if args.padim_suite:
+        from build_comparison_report import build_comparison_report
+        build_comparison_report(root,index)
+        LOG.info("PaDiM paired comparison: %s",root/"comparison.html")
     build_report(root,index)
     LOG.info("Report: %s",root/"index.html")
     LOG.info("Log: %s",root/"run.log")

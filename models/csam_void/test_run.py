@@ -48,19 +48,22 @@ class TestCSAM(unittest.TestCase):
                 save_panel(x, score, .5, p)
                 with Image.open(p) as image:
                     a = np.asarray(image)
-                self.assertEqual(a.shape, (h+96, w*3+48, 3))
-                left, top = 12+2*(w+12), 32
-                original = a[top:top+h, 12:12+w, 0]
-                np.testing.assert_array_equal(original, (x*255).astype(np.uint8))
-                mask = a[top:top+h, left:left+w, 0]
-                np.testing.assert_array_equal(mask, (score>.5)*255)
-                np.testing.assert_array_equal(a[top:top+h,12+w+12:12+2*w+12],jet_heatmap(score))
+                scale = 4
+                ph, pw = h*scale, w*scale
+                expand = lambda v: np.repeat(np.repeat(v,scale,axis=0),scale,axis=1)
+                self.assertEqual(a.shape, (ph+96, pw*3+48, 3))
+                left, top = 12+2*(pw+12), 32
+                original = a[top:top+ph, 12:12+pw, 0]
+                np.testing.assert_array_equal(original, expand((x*255).astype(np.uint8)))
+                mask = a[top:top+ph, left:left+pw, 0]
+                np.testing.assert_array_equal(mask, expand((score>.5)*255))
+                np.testing.assert_array_equal(a[top:top+ph,12+pw+12:12+2*pw+12],expand(jet_heatmap(score)))
                 p2 = Path(d) / "panel2.png"
                 score[0, 0] = 99
                 save_panel(x, score, .5, p2)
                 with Image.open(p2) as image:
                     b = np.asarray(image)
-                cx, cy = 12+w+12+20, top+10
+                cx, cy = 12+pw+12+20*scale, top+10*scale
                 np.testing.assert_array_equal(a[cy,cx], b[cy,cx])
 
     def test_manifest_optional_wafer_metadata(self):
@@ -91,8 +94,9 @@ class TestCSAM(unittest.TestCase):
                 lines=panel_metadata_lines(row,True,.9)
                 self.assertEqual(lines,["Lot: "+"L"*90,"Wafer: 007","Equipment: EQ-1",
                                         "GT: VOID (1) | GT pixels: 2","Image prediction: VOID (1) | Score: 0.9"])
-                save_eval([row],raw[None],cal,root,"test")
+                save_eval([row],raw[None],cal,root,"test",panel_scale=1,collect_comparison=True)
                 self.assertEqual({p.name for p in (root/"test").iterdir()},{"scores.csv","7_panel.png"})
+                self.assertTrue((root/"comparison_stats.json").is_file())
                 with (root/"test"/"scores.csv").open(newline="",encoding="utf-8") as f:
                     rec=next(csv.DictReader(f))
                 self.assertEqual(rec["wafer"],"007")
@@ -108,7 +112,7 @@ class TestCSAM(unittest.TestCase):
                 np.testing.assert_array_equal(a[top:top+h,24+w:24+2*w],jet_heatmap(norm))
                 left=12+2*(w+12)
                 np.testing.assert_array_equal(a[top:top+h,left:left+w,0],(norm>.5)*255)
-                save_eval([row],raw[None],cal,root,"val",save_raw_maps=True)
+                save_eval([row],raw[None],cal,root,"val",save_raw_maps=True,panel_scale=1)
                 self.assertEqual({p.name for p in (root/"val").iterdir()},
                                  {"scores.csv","7_panel.png","7.npy","7_normalized.npy"})
                 np.testing.assert_array_equal(np.load(root/"val"/"7.npy"),raw)

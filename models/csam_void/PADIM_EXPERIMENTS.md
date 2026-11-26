@@ -214,6 +214,7 @@ python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out 
 | 출력 | 어디에 활용하는가? |
 |---|---|
 | `index.html` | 처음 보는 사람을 위한 안내, 실험/지표 설명, validation-selected 모델, matched pair 비교, FPR/recall 그래프, 설비별 성능 |
+| `comparison.html` | P0 대비 동일 test 이미지/GT에 대한 정량·정성 개선 효과 보고서. 학습 종료 시 자동 생성 |
 | `summary.csv` | 통합 metric 및 overall/equipment 상세 수치 |
 | `selected.json`, `results.json` | 각 protocol의 선정 모델 및 상세 수치 |
 | `config.json`, `split_audit.json` | 실제 적용 설정과 데이터 분할 감사 |
@@ -221,9 +222,24 @@ python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out 
 | `backbone_summary.json`, `history.json` | P1–P5 backbone 학습 diagnostics |
 | `operating_points.json` | Validation 기준 raw threshold의 val/test FPR–Recall 변화 |
 | `val/test/scores.csv` | 이미지별 label, lot, wafer, equipment, raw/normalized image score 및 예측 |
-| `val/test/*_panel.png` | 원본 이미지 · 정규화 anomaly map · prediction mask (각각 native resolution), lot/wafer/equipment/GT 메타데이터와 image 예측 표시 |
+| `val/test/*_panel.png` | 원본 이미지 · 정규화 anomaly map · prediction mask (native grid를 4배 nearest-neighbor로 확대 표시), lot/wafer/equipment/GT 메타데이터와 image 예측 표시 |
+| `comparison_stats.json` | 동일 image/GT 확인용 fingerprint, 원본 GT 연결 영역별 overlap 및 배경 pixel 집계 (raw map 저장 없이 비교 재생성 가능) |
 
 수치 분석용 raw/normalized NPY map은 필요할 때 `--save-raw-maps` 옵션으로 추가 저장한다.
+
+시각화 패널은 기본 `--panel-scale 4`이며, 예를 들어 61×81은 각 패널 244×324로 표시된다. 원본 pixel 값을 그대로 복제하여 blur/색 보간 없이 확대한다. 더 크게 보려면 `--panel-scale 6`을 지정한다. 입력 전처리의 `--upsample-factor`와 무관하다.
+
+### P0 대비 개선 효과를 입증하는 비교 보고서
+
+`comparison.html`은 P0와 P1–P5를 각각 동일 test 이미지와 GT mask에서 비교한다. 이전에 잡던 void 영역을 놓쳤는지(동일 GT region의 유지/유실/신규 검출, 1px/2–4px/5+px별 집계), 설비 차이에 의한 background FP가 감소했는지(정상 image FPR, GT 외부 pixel FPR, normalized score 분포, 설비별 최대값/범위) 모두 보여준다. Validation에서 정한 동일 목표 recall/FPR에서의 operating point도 확인한다. 예를 들어 P0와 P2가 각각 100개 void를 검출해 recall이 같더라도, P0에서 검출한 5개를 놓치고 다른 5개를 새로 검출했다면 유지율은 95%이다.
+
+정성 사례는 개선, 기존 void 유실, 새 void 검출, 과검출 악화를 자동 분류하여 P0/후보의 같은 이미지 3-panel을 함께 보여준다. 실제 이미지가 내장되므로 사내에서만 취급한다. 기존 개선 보고서를 다시 생성할 때:
+
+```powershell
+python models/csam_void/build_comparison_report.py --root D:/csam_results/padim01
+```
+
+정확한 보고서를 다시 만들려면 이번 버전이 실행 중 저장하는 `comparison_stats.json`이 필요하다. 구버전 3-panel만으로는 native GT 영역 비교를 복원할 수 없으므로 해당 경우 N/A로 표시된다.
 
 기존 결과에 대해 보고서만 갱신하려면 학습 없이 다음을 실행한다.
 

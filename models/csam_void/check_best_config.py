@@ -8,9 +8,14 @@ from PIL import Image
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("root",type=Path)
-    root=p.parse_args().root/"pooled"
+    run_root=p.parse_args().root
+    root=run_root/"pooled"
+    comparison=(run_root/"comparison.html").read_text(encoding="utf-8")
+    assert "P0 대비 개선 효과 비교" in comparison and "P0 vs p5_pixel_mixstyle" in comparison
     conf=json.loads((root/"config.json").read_text())
     native=tuple(conf["native_shape"])
+    scale=conf["panel_scale"]
+    assert scale==4
     assert conf["upsample_factor"]==4 and conf["padim_size"] is None
     assert conf["max_layer_depth"]==2 and conf["padim_dim"]==40
     assert conf["padim_input_shape"]==[v*4 for v in native]
@@ -19,6 +24,7 @@ def main():
     ref=torch.load(root/"p0_pretrained"/"model.pt",map_location="cpu",weights_only=True)
     for r in results:
         d=root/r["experiment"]
+        assert (d/"comparison_stats.json").is_file()
         model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
         assert model["upsample_factor"]==4 and model["max_layer_depth"]==2 and model["n_features"]==40
         assert model["backbone_name"]=="resnet18.a1_in1k"
@@ -34,7 +40,7 @@ def main():
             assert not list((d/split).glob("*.npy"))
             for f in panels:
                 with Image.open(f) as im:
-                    assert im.height>native[0]+96 and im.width>=native[1]*3+48
+                    assert im.height>native[0]*scale+96 and im.width>=native[1]*scale*3+48
         if r["experiment"]!="p0_pretrained":
             summary=json.loads((d/"backbone_summary.json").read_text())
             assert summary["weight_max_abs_change"]>0 and summary["max_layer_depth"]==2

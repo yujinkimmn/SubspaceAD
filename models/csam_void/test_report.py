@@ -45,6 +45,8 @@ class TestStandaloneReport(unittest.TestCase):
             self.assertEqual(rows[-1]["status"],"missing")
             self.assertEqual(build_report(root),target)
             self.assertEqual(target.read_text(encoding="utf-8"),s)
+            (root/"comparison.html").write_text("<html>comparison</html>",encoding="utf-8")
+            self.assertIn("href='comparison.html'",build_report(root).read_text(encoding="utf-8"))
 
     def test_padim_guide_and_matched_validation_deltas(self):
         with tempfile.TemporaryDirectory() as tmp:

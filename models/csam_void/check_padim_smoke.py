@@ -18,10 +18,13 @@ def main():
     assert len(index)==4 and all(r["status"]=="ok" for r in index),index
     report=(root/"index.html").read_text(encoding="utf-8")
     assert "Recall–FPR trade-off" in report and "Backbone training diagnostics" in report
+    comparison=(root/"comparison.html").read_text(encoding="utf-8")
+    assert "P0 대비 개선 효과 비교" in comparison
     for proto in index:
         name=proto["protocol"]
         out=root/name
         results=read(out/"results.json")
+        test_ids={r["id"] for r in read(out/"split_audit.json")["test"]}
         assert len(results)==6 and all(r["status"]=="ok" for r in results),results
         old=args.baseline/name/"exp0_padim"
         base=out/"p0_pretrained"
@@ -36,6 +39,11 @@ def main():
             exp=r["experiment"]
             d=out/exp
             assert (d/"model.pt").is_file() and (d/"operating_points.json").is_file()
+            evidence=read(d/"comparison_stats.json")
+            assert evidence["schema_version"]==1 and evidence["split"]=="test"
+            assert {r["id"] for r in evidence["samples"]}==test_ids
+            if exp!="p0_pretrained":
+                assert f"P0 vs {exp}" in comparison
             model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
             assert model["backbone_name"]=="resnet18.a1_in1k"
             assert model["post_processor"]==r["post_processor"]==read(d/"threshold.json")
