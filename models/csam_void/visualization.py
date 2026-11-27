@@ -64,6 +64,6 @@ def save_panel(x, score, threshold, path, metadata=None, *, scale=4):
     draw.line((tick, y - 2, tick, y + 12), fill="black", width=1)
     draw.text((left, y + 15), "0", fill="black")
     draw.text((left + pw, y + 15), "1", anchor="ra", fill="black")
-    draw.text((margin, y + 30), f"Threshold: {threshold:.3g} | Max: {score.max():.3g} | Display: {scale}x nearest", fill="black")
+    draw.text((margin, y + 30), f"Pixel threshold: {threshold:.3g} | Map max: {score.max():.3g} | Display: {scale}x nearest", fill="black")
     draw.text((margin, y + 44), "White = predicted defect", fill="black")
     canvas.save(path)

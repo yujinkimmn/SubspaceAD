@@ -212,9 +212,13 @@ def matched_operating_points(base_result, candidate_result):
             rows.append((label,split,pct(x.get("fpr")),pct(y.get("fpr")),pp(x.get("fpr"),y.get("fpr")),
                          pct(x.get("recall")),pct(y.get("recall")),pct(x.get("region_1px")),pct(y.get("region_1px")),
                          pct(x.get("region_2_4px")),pct(y.get("region_2_4px"))))
+    sources=[result.get("post_processor",{}).get("image_score_source") for result in (base_result,candidate_result)]
+    source_note=("Image score는 모델 input 해상도 map의 max, region score는 원본 해상도 map에서 계산한다. "
+                 if sources==["model_input_map_max","model_input_map_max"] else
+                 "Image score source는 기존 실행의 저장된 calibration 정의를 따른다. ")
     return ("<h4>동일한 validation 목표에서 비교 (추가 진단)</h4>"
             "<p>각 모델의 validation score에서 정한 공통 raw image/pixel threshold를 test에도 고정 적용했다. "
-            "동일 목표에 도달하더라도 score tie 때문에 실제 validation recall은 다를 수 있다. "
+            +source_note+"동일 목표에 도달하더라도 score tie 때문에 실제 validation recall은 다를 수 있다. "
             "위의 최종 F1-adaptive 판정과 별개이며 test threshold 최적화는 하지 않는다.</p>"
             +tab(["Validation 목표","Split","P0 FPR","후보 FPR","Δ FPR","P0 image recall","후보 image recall",
                   "P0 1px recall","후보 1px recall","P0 2–4px recall","후보 2–4px recall"],rows))

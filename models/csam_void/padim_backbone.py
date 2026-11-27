@@ -13,6 +13,7 @@ from sklearn.metrics import roc_auc_score
 from csam_progress import stage_progress, epoch_note
 from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
                  padim_input, padim_preprocess, restore_head_logits)
+from score_processing import get_raw_image_scores
 
 PEXPS = ["p0_pretrained", "p1_classification", "p2_classification_mixstyle",
          "p3_consistency", "p4_consistency_mixstyle", "p5_pixel_mixstyle"]
@@ -206,10 +207,11 @@ def adapt_backbone(net,exp,parts,args,device,out):
         upsample_factor=args.upsample_factor,n_features=args.padim_dim,final_proxy=history[-1]["val"]),indent=2),encoding="utf-8")
     LOG.info("[Backbone] frozen; weight_delta=%.6g mix_calls=%d; Gaussian fit uses real normals, MixStyle OFF",delta,mix.applied if mix else 0)
 
-def score_samples(rows,maps):
+def score_samples(rows,maps,raw_image_scores=None):
     groups={"normal":[],"positive":[],"1px":[],"2-4px":[],"5+px":[]}
-    for r,m in zip(rows,maps):
-        groups["positive" if r["label"]==1 else "normal"].append(float(m.max()))
+    scores=get_raw_image_scores(maps,raw_image_scores)
+    for r,m,score in zip(rows,maps,scores):
+        groups["positive" if r["label"]==1 else "normal"].append(float(score))
         lab,n=ndimage.label(r["y"]>0,structure=np.ones((3,3)))
         for j in range(1,n+1):
             obj=lab==j
@@ -224,9 +226,9 @@ def rates(groups,threshold):
     return dict(fpr=rate("normal"),recall=rate("positive"),
                 region_1px=rate("1px"),region_2_4px=rate("2-4px"),region_5px=rate("5+px"))
 
-def operating_points(val_rows,vm,test_rows,tm,primary):
+def operating_points(val_rows,vm,test_rows,tm,primary,*,val_image_scores=None,test_image_scores=None):
     """All operating thresholds come from validation only, including the ROC-like sweep."""
-    v,t=score_samples(val_rows,vm),score_samples(test_rows,tm)
+    v,t=score_samples(val_rows,vm,val_image_scores),score_samples(test_rows,tm,test_image_scores)
     points=[]
     for q in (.5,.7,.8,.9,.95,.98,1.):
         a=v["positive"]

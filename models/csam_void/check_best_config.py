@@ -1,5 +1,6 @@
 """Validate native geometry, channel sampling and frozen unused layers for default P0-P5."""
 import argparse
+import csv
 import json
 from pathlib import Path
 import torch
@@ -20,6 +21,7 @@ def main():
     assert conf["max_layer_depth"]==2 and conf["padim_dim"]==40
     assert conf["padim_input_shape"]==[v*4 for v in native]
     assert conf["padim_map_restore"]=="bilinear_input_then_native"
+    assert conf["padim_image_score_source"]=="model_input_map_max"
     results=json.loads((root/"results.json").read_text())
     assert len(results)==6 and all(r["status"]=="ok" for r in results),results
     ref=torch.load(root/"p0_pretrained"/"model.pt",map_location="cpu",weights_only=True)
@@ -30,6 +32,7 @@ def main():
         assert model["upsample_factor"]==4 and model["max_layer_depth"]==2 and model["n_features"]==40
         assert model["backbone_name"]=="resnet18.a1_in1k"
         assert model["map_restore"]=="bilinear_input_then_native"
+        assert model["image_score_source"]=="model_input_map_max"
         assert model["post_processor"]==r["post_processor"]
         assert tuple(model["feature_shape"])==native
         assert tuple(model["mu"].shape)==(native[0]*native[1],40)
@@ -37,6 +40,13 @@ def main():
         assert int(model["channels"].max())<192 and torch.equal(model["channels"],ref["channels"])
         assert all(torch.equal(v,ref["backbone"][k]) for k,v in model["backbone"].items() if not k.startswith(("layer1.","layer2.")))
         for split in ("val","test"):
+            with (d/split/"scores.csv").open(newline="",encoding="utf-8") as f:
+                records=list(csv.DictReader(f))
+            raw=[float(r["raw_score"]) for r in records]
+            assert all(v+1e-6*(1+abs(v))>=float(r["native_map_max"]) for v,r in zip(raw,records))
+            if split=="val":
+                assert model["post_processor"]["image_min"]==min(raw)
+                assert model["post_processor"]["image_max"]==max(raw)
             panels=list((d/split).glob("*_panel.png"))
             assert panels and {f.name for f in panels}=={f.name for f in (d/split).glob("*.png")}
             assert not list((d/split).glob("*.npy"))

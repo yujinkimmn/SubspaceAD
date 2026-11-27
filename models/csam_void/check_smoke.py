@@ -58,6 +58,8 @@ def main():
             cal=json.loads((d/"threshold.json").read_text())
             assert cal==r["post_processor"]==torch.load(d/"model.pt",map_location="cpu",weights_only=True)["post_processor"]
             assert cal["source"]=="validation" and cal["threshold"]==.5
+            expected_source="model_input_map_max" if r["experiment"]=="exp0_padim" else "native_map_max"
+            assert cal["image_score_source"]==expected_source
             for split in ("val","test"):
                 with (d/split/"scores.csv").open(newline="",encoding="utf-8") as f:
                     records=list(csv.DictReader(f))
@@ -67,10 +69,17 @@ def main():
                 diagnostic_maps=config.get("save_raw_maps",False)
                 if diagnostic_maps:
                     raw=np.stack([np.load(d/split/(rec["id"]+".npy")) for rec in records])
-                    scores,norm,labels,masks=post_process(raw,cal)
+                    raw_scores=np.asarray([float(rec["raw_score"]) for rec in records],dtype=np.float32)
+                    native_peak=raw.max(axis=(1,2))
+                    np.testing.assert_allclose(native_peak,[float(rec["native_map_max"]) for rec in records])
+                    if expected_source=="native_map_max":
+                        np.testing.assert_allclose(raw_scores,native_peak)
+                    else:
+                        assert np.all(raw_scores+1e-6*(1+np.abs(raw_scores))>=native_peak)
+                    scores,norm,labels,masks=post_process(raw,cal,raw_image_scores=raw_scores)
                     if split=="val":
-                        assert cal["image_min"]==float(raw.max(axis=(1,2)).min())
-                        assert cal["image_max"]==float(raw.max())
+                        assert cal["image_min"]==float(raw_scores.min())
+                        assert cal["image_max"]==float(raw_scores.max())
                         assert cal["pixel_min"]==float(raw.min()) and cal["pixel_max"]==float(raw.max())
                 else:
                     assert not list((d/split).glob("*.npy"))

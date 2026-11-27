@@ -155,6 +155,26 @@ class TestCSAM(unittest.TestCase):
         self.assertFalse(labels[0])
         self.assertTrue(masks[0,0,0])
 
+    def test_padim_explicit_image_score_reaches_metrics_csv_and_evidence(self):
+        y=np.array([[1,0],[0,0]],np.float32)
+        rows=[dict(id="2",image="void.png",label=1,y=y,x=y,equipment="A",lot="L1",wafer="01"),
+              dict(id="3",image="normal.png",label=0,y=y*0,x=y*0,equipment="A",lot="L2",wafer="02")]
+        maps=np.array([[[1,.1],[.1,.1]],[[3,.1],[.1,.1]]],np.float32)
+        cal=calibrate_post_processor(rows,maps,raw_image_scores=[4.,3.])
+        self.assertEqual(metrics(rows,maps,.5,"val",cal,raw_image_scores=[4.,3.])["image_auroc"],1.)
+        test=metrics(rows,maps,.5,"test",cal,raw_image_scores=[5.,3.])
+        self.assertEqual((test["tp"],test["fp"],test["image_f1"]),(1,0,1.))
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            save_eval(rows,maps,cal,root,"test",panel_scale=1,raw_image_scores=[5.,3.],
+                      collect_comparison=True)
+            with (root/"test"/"scores.csv").open(newline="",encoding="utf-8") as f:
+                rec=list(csv.DictReader(f))
+            self.assertEqual(float(rec[0]["raw_score"]),5.)
+            self.assertEqual(float(rec[0]["native_map_max"]),1.)
+            self.assertEqual(rec[0]["prediction"],"1")
+            self.assertEqual(rec[1]["prediction"],"0")
+
     def test_aligned_standard_metrics(self):
         y = np.array([[1,0,0],[0,0,0]],dtype=np.float32)
         rows = [dict(label=1,y=y,equipment="a"),dict(label=0,y=y*0,equipment="a")]

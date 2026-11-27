@@ -345,7 +345,8 @@ def build_report(root,index=None):
                            f"upsample factor: {esc(config.get('upsample_factor') or 'square letterbox')}; "
                            f"max layer depth: {esc(config.get('max_layer_depth'))}; "
                            f"n_features: {esc(config.get('padim_dim'))}; "
-                           f"anomaly map restoration: {esc(config.get('padim_map_restore','not recorded'))}.</p>")
+                           f"anomaly map restoration: {esc(config.get('padim_map_restore','not recorded'))}; "
+                           f"image score source: {esc(config.get('padim_image_score_source','not recorded'))}.</p>")
         if (directory/"report.html").is_file():
             section.append(f"<p><a href='{quote(name)}/report.html'>Optional original detailed report</a></p>")
         main_rows=[]; detail_rows=[]; region_rows=[]

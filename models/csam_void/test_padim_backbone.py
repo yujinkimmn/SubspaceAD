@@ -70,6 +70,23 @@ class TestPadimBackbone(unittest.TestCase):
                              mode="bilinear",align_corners=False)
         torch.testing.assert_close(restore_padim_map(score,crop,shape,64,None),expected)
 
+    def test_pred_score_is_max_before_native_downsample(self):
+        from run import padim_prediction_maps
+        from torch.nn.functional import interpolate
+        for shape in ((61,81),(81,61)):
+            distance=torch.zeros(2,1,*shape)
+            distance[0,0,5,5]=1
+            distance[0,0,5,6]=.8
+            distance[1,0,10,10]=2
+            distance[1,0,11,10]=.9
+            crop=(0,0,shape[0]*4,shape[1]*4)
+            high=interpolate(distance,size=crop[-2:],mode="bilinear",align_corners=False)
+            expected=interpolate(high,size=shape,mode="bilinear",align_corners=False)
+            native,score=padim_prediction_maps(distance,crop,shape,None,4,0.)
+            torch.testing.assert_close(native,expected)
+            torch.testing.assert_close(score,high.amax(dim=(-2,-1)).squeeze(1))
+            self.assertTrue(torch.all(score>native.amax(dim=(-2,-1)).squeeze(1)))
+
     def test_transform_matches_original_dtype_resize_order(self):
         from torchvision.transforms import v2
         for dtype, maximum in ((np.uint8,255),(np.uint16,65535)):
@@ -120,6 +137,13 @@ class TestPadimBackbone(unittest.TestCase):
         other=operating_points(rows,val,rows,test*100,1.)
         self.assertEqual([p["threshold"] for p in result["points"]],
                          [p["threshold"] for p in other["points"]])
+
+        explicit=operating_points(rows,val,rows,test,None,
+                                  val_image_scores=[3.,3.,8.],test_image_scores=[4.,4.,9.])
+        target=next(p for p in explicit["points"] if p["kind"]=="image_recall" and p["target"]==.95)
+        self.assertEqual(target["threshold"],8.)
+        self.assertEqual(target["test"]["recall"],1.)
+        self.assertEqual(target["test"]["fpr"],0.)
 
 if __name__=="__main__":
     unittest.main()

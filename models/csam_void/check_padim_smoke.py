@@ -1,5 +1,6 @@
 """Check synthetic P0-P5 artifacts and P0 equivalence to the original PaDiM."""
 import argparse
+import csv
 import json
 from pathlib import Path
 import numpy as np
@@ -34,6 +35,13 @@ def main():
             assert {f.name for f in files}=={f.name for f in (base/split).glob("*.npy")}
             for f in files:
                 np.testing.assert_allclose(np.load(f),np.load(base/split/f.name),rtol=1e-6,atol=1e-6)
+            def read_scores(path):
+                with path.open(newline="",encoding="utf-8") as f:
+                    return [(r["id"],float(r["raw_score"]),float(r["score"]),int(r["prediction"]))
+                            for r in csv.DictReader(f)]
+            a,b=read_scores(old/split/"scores.csv"),read_scores(base/split/"scores.csv")
+            assert [r[0] for r in a]==[r[0] for r in b]
+            np.testing.assert_allclose([r[1:] for r in a],[r[1:] for r in b],rtol=1e-6,atol=1e-6)
         ref=torch.load(base/"model.pt",map_location="cpu",weights_only=True)
         for r in results:
             exp=r["experiment"]
@@ -46,6 +54,8 @@ def main():
                 assert f"P0 vs {exp}" in comparison
             model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
             assert model["backbone_name"]=="resnet18.a1_in1k"
+            assert model["image_score_source"]=="model_input_map_max"
+            assert model["post_processor"]["image_score_source"]=="model_input_map_max"
             assert model["post_processor"]==r["post_processor"]==read(d/"threshold.json")
             assert torch.equal(model["channels"],ref["channels"])
             if exp!="p0_pretrained":

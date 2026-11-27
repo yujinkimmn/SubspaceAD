@@ -26,7 +26,7 @@ PaDiM은 위치마다 정상 feature가 어느 범위에 분포하는지 기억�
 d = sqrt((f - μ)^T Σ^-1 (f - μ))
 ```
 
-가상의 1차원 예에서 평균이 10, 표준편차가 2라면 feature 11의 거리는 0.5, feature 16의 거리는 3이다. 실제 구현은 정상 feature 40차원 전체의 공분산을 고려하며 covariance에 0.01 × I를 더해 안정화한 뒤 Cholesky 분해를 사용한다. 위치별 거리 전체가 anomaly map이고, map 최댓값은 image score가 된다.
+가상의 1차원 예에서 평균이 10, 표준편차가 2라면 feature 11의 거리는 0.5, feature 16의 거리는 3이다. 실제 구현은 정상 feature 40차원 전체의 공분산을 고려하며 covariance에 0.01 × I를 더해 안정화한 뒤 Cholesky 분해를 사용한다. 위치별 Mahalanobis distance map을 모델 input 해상도로 bilinear 복원한 뒤, 그 map의 최댓값을 raw image score(`pred_score`)로 계산한다.
 
 모든 P0–P5의 최종 검출 방식은 같으며, **P1–P5는 Gaussian fit 전에 backbone을 조정한다.** 학습한 image classification/segmentation head 자체가 최종 검사 모델이 아니다.
 
@@ -46,7 +46,7 @@ d = sqrt((f - μ)^T Σ^-1 (f - μ))
 | Seed / batch | 42 / 8 |
 | Gaussian fit | 확인된 정상 train 이미지 전용, 최소 2장 |
 
-예: 원본 (H,W)=(81,61) → (324,244) → layer1 (64,81,61), layer2 (128,41,31) → layer2를 layer1 위치에 nearest alignment → 192 channels 중 40개 선택 → 위치별 Gaussian. Mahalanobis distance map (81,61)은 기존 프로젝트에서 사용하는 방식에 맞춰 모델 입력 크기 (324,244)로 bilinear 확대한 뒤 (81,61)로 bilinear 축소한다. 기본 Gaussian blur는 0이며, 최종 native map을 평가·저장에 사용한다. 임시 backbone 학습 head의 native logit 복원은 기존대로 유지한다. 이전 direct-map 결과와는 복원 방식이 달라 새 calibration/evaluation으로 비교해야 한다.
+예: 원본 (H,W)=(81,61) → (324,244) → layer1 (64,81,61), layer2 (128,41,31) → layer2를 layer1 위치에 nearest alignment → 192 channels 중 40개 선택 → 위치별 Gaussian. Mahalanobis distance map (81,61)은 기존 프로젝트에서 사용하는 방식에 맞춰 모델 입력 크기 (324,244)로 bilinear 확대한 뒤 (81,61)로 bilinear 축소한다. 모델 input 해상도 map의 최댓값을 raw `pred_score`로 먼저 저장한다. 기본 Gaussian blur는 0이며, 최종 native map은 pixel 평가·저장에 사용한다. Image threshold, AUROC, F1 및 image FPR/Recall은 축소 전 `pred_score`를 사용한다. 임시 backbone 학습 head의 native logit 복원은 기존대로 유지한다. 이전 direct-map 결과와는 복원 방식이 달라 새 calibration/evaluation으로 비교해야 한다.
 
 가중치 파일은 [공식 timm 다운로드](https://github.com/huggingface/pytorch-image-models/releases/download/v0.1-rsb-weights/resnet18_a1_0-d63eafa0.pth), [공식 모델 정보](https://huggingface.co/timm/resnet18.a1_in1k)를 참고한다. torchvision ResNet18 checkpoint와 구조가 유사해도 학습된 weight는 다르다. 이 연구용 구현이 기존 anomalib 배포 모델과 수치까지 완전히 같은 것은 아니다.
 
@@ -132,7 +132,7 @@ Pooled와 각 holdout은 데이터 조건이 다르다. 반드시 같은 protoco
 
 ## 5. Threshold 및 평가 지표
 
-각 모델/프로토콜의 validation에서 image raw score와 pixel raw map에 대해 각각 F1-adaptive threshold, min, max를 계산하고 독립적으로 정규화한다.
+각 모델/프로토콜의 validation에서 축소 전 model input map의 최댓값인 image raw score와 native pixel raw map에 대해 각각 F1-adaptive threshold, min, max를 계산하고 독립적으로 정규화한다.
 
 ```text
 normalized = clip((raw_score - threshold) / (max - min) + 0.5, 0, 1)
@@ -224,7 +224,7 @@ python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out 
 | `model.pt`, `threshold.json` | Backbone + Gaussian 통계 + validation postprocessor |
 | `backbone_summary.json`, `history.json` | P1–P5 backbone 학습 diagnostics |
 | `operating_points.json` | Validation 기준 raw threshold의 val/test FPR–Recall 변화 |
-| `val/test/scores.csv` | 이미지별 label, lot, wafer, equipment, raw/normalized image score 및 예측 |
+| `val/test/scores.csv` | 이미지별 label, lot, wafer, equipment, raw/normalized image score, 진단용 native map max 및 예측 |
 | `val/test/*_panel.png` | 원본 이미지 · 정규화 anomaly map · prediction mask (native grid를 4배 nearest-neighbor로 확대 표시), lot/wafer/equipment/GT 메타데이터와 image 예측 표시 |
 | `comparison_stats.json` | 동일 image/GT 확인용 fingerprint, 원본 GT 연결 영역별 overlap 및 배경 pixel 집계 (raw map 저장 없이 비교 재생성 가능) |
 

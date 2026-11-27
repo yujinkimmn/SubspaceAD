@@ -15,7 +15,9 @@ from PIL import Image
 from visualization import jet_heatmap, panel_metadata_lines, save_panel
 from csam_progress import LOG, setup_logging, console_info, epoch_note, stage_progress
 from scipy import ndimage
-from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
+from sklearn.metrics import roc_auc_score, roc_curve
+from score_processing import (NORMALIZED_THRESHOLD, PADIM_IMAGE_SCORE_SOURCE, get_raw_image_scores,
+                              f1_adaptive_threshold, calibrate_post_processor, normalize_scores, post_process)
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -24,7 +26,6 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 H, W = 61, 81
 PADIM_BACKBONE = "resnet18.a1_in1k"
 PADIM_MAP_RESTORE = "bilinear_input_then_native"
-NORMALIZED_THRESHOLD = .5
 EXPS = ["exp0_padim", "exp1_cnn", "exp2_normals", "exp3_hard_negative",
         "exp4_copy_paste", "exp5_domain_aug", "exp6_mixstyle", "exp7_semi"]
 
@@ -281,38 +282,6 @@ def threshold_for(rows, maps, recall, region_recall=.90):
             thresholds.append(vals[math.ceil(region_recall * len(vals))-1])
     return min(thresholds)
 
-def f1_adaptive_threshold(scores, labels):
-    """Validation-only F1 maximum on raw scores, following anomalib's PR-curve rule."""
-    precision, recall, thresholds = precision_recall_curve(labels.ravel(), scores.ravel())
-    p, r = precision[:-1], recall[:-1]
-    f1 = np.divide(2*p*r, p+r, out=np.zeros_like(p), where=(p+r)>0)
-    return float(thresholds[np.argmax(f1)])
-
-def calibrate_post_processor(rows, maps):
-    """Fit independent image and pixel thresholds/min/max on validation only."""
-    scores = maps.max(axis=(1, 2))
-    labels = np.asarray([r["label"] for r in rows])
-    masks = np.stack([r["y"] > 0 for r in rows])
-    return dict(source="validation", method="f1_adaptive", threshold=NORMALIZED_THRESHOLD,
-                image_threshold=f1_adaptive_threshold(scores, labels),
-                image_min=float(scores.min()), image_max=float(scores.max()),
-                pixel_threshold=f1_adaptive_threshold(maps, masks),
-                pixel_min=float(maps.min()), pixel_max=float(maps.max()))
-
-def normalize_scores(values, threshold, minimum, maximum):
-    """Anomalib threshold-centered min/max normalization with clipping to [0, 1]."""
-    values = np.asarray(values, dtype=np.float32)
-    if maximum == minimum:
-        # Constant calibration scores have no range; keep equality at 0.5.
-        return np.where(values > threshold, 1., np.where(values < threshold, 0., .5)).astype(np.float32)
-    return np.clip((values-threshold)/(maximum-minimum)+.5, 0., 1.)
-
-def post_process(maps, calibration):
-    raw_scores = maps.max(axis=(1, 2))
-    scores = normalize_scores(raw_scores, calibration["image_threshold"], calibration["image_min"], calibration["image_max"])
-    normalized = normalize_scores(maps, calibration["pixel_threshold"], calibration["pixel_min"], calibration["pixel_max"])
-    return scores, normalized, scores > NORMALIZED_THRESHOLD, normalized > NORMALIZED_THRESHOLD
-
 def pixel_metrics(rows, maps, include_aupro=False):
     """Dataset-level pixel AUROC and exact region-balanced partial ROC area."""
     target = np.stack([r["y"] > 0 for r in rows])
@@ -385,14 +354,18 @@ def summarize(rows, maps, threshold, evaluation_split=None, *, image_scores=None
             result["image_f1"] = div(2*tp, 2*tp+fp+fn) or 0.0
     return result
 
-def metrics(rows, maps, threshold, evaluation_split=None, calibration=None):
+def metrics(rows, maps, threshold, evaluation_split=None, calibration=None, *, raw_image_scores=None):
     inputs = {}
     if calibration is not None:
-        scores, normalized, pred_labels, pred_masks = post_process(maps, calibration)
+        raw_scores = get_raw_image_scores(maps, raw_image_scores, calibration=calibration)
+        scores, normalized, pred_labels, pred_masks = post_process(maps, calibration, raw_image_scores=raw_scores)
         # anomalib evaluates validation AUROC before post-processing; test uses the normalized output.
-        inputs = dict(image_scores=maps.max(axis=(1,2)) if evaluation_split=="val" else scores,
+        inputs = dict(image_scores=raw_scores if evaluation_split=="val" else scores,
                       pred_labels=pred_labels, pred_masks=pred_masks,
                       metric_maps=maps if evaluation_split=="val" else normalized)
+    elif raw_image_scores is not None:
+        scores=get_raw_image_scores(maps,raw_image_scores)
+        inputs=dict(image_scores=scores,pred_labels=scores>=threshold)
     overall = summarize(rows,maps,threshold,evaluation_split,**inputs)
     by = {}
     for eq in sorted({r["equipment"] for r in rows}):
@@ -568,16 +541,35 @@ def create_padim_backbone(weights=None, *, pretrained=True):
             raise ValueError("torchvision ResNet18 weights are not resnet18.a1_in1k; download the timm checkpoint")
     return timm.create_model(PADIM_BACKBONE, pretrained=pretrained and not weights, checkpoint_path=str(weights or ""))
 
-def restore_padim_map(score,crop,native,size=224,upsample_factor=None):
-    """Match the original PaDiM anomaly-map path: input grid, then native grid."""
-    top,left,h,w=crop
+def padim_input_anomaly_map(score,crop,size=224,upsample_factor=None,smooth=0.):
+    """Anomalib-style anomaly map at the actual model input resolution."""
+    _,_,h,w=crop
     input_shape=(h,w) if upsample_factor is not None else (size,size)
-    # Even when the distance grid already equals the native image, restore the
-    # model input resolution first, as anomalib's map generator does.
     score=F.interpolate(score,size=input_shape,mode="bilinear",align_corners=False)
+    if smooth>0:
+        # Optional Gaussian smoothing is on the input grid, before taking pred_score.
+        # Default sigma=0 preserves the project's identity smoothing.
+        blurred=ndimage.gaussian_filter(score.detach().cpu().numpy(),
+                                        sigma=(0,0,smooth,smooth),mode="mirror")
+        score=torch.from_numpy(blurred).to(score.device)
+    return score
+
+def restore_native_map(score,crop,native,upsample_factor=None):
+    top,left,h,w=crop
     if upsample_factor is None:
         score=score[:,:,top:top+h,left:left+w]
     return F.interpolate(score,size=native,mode="bilinear",align_corners=False)
+
+def restore_padim_map(score,crop,native,size=224,upsample_factor=None):
+    """Restore through the model input grid, then return the native score map."""
+    return restore_native_map(padim_input_anomaly_map(score,crop,size,upsample_factor),
+                              crop,native,upsample_factor)
+
+def padim_prediction_maps(distance,crop,native,size=224,upsample_factor=None,smooth=0.):
+    """Keep pred_score from the model output, independently of native-map restoration."""
+    anomaly_map=padim_input_anomaly_map(distance,crop,size,upsample_factor,smooth)
+    pred_score=anomaly_map.amax(dim=(-2,-1)).squeeze(1)
+    return restore_native_map(anomaly_map,crop,native,upsample_factor),pred_score
 
 def restore_head_logits(logits,crop,native,size=224,upsample_factor=None):
     """Keep the adaptation head's existing native supervision geometry."""
@@ -637,8 +629,8 @@ class Padim:
             self.mu=mu.float()
             self.chol=torch.linalg.cholesky(cov).float()
     @torch.no_grad()
-    def maps(self,rows,desc=None):
-        out=[]
+    def predict(self,rows,desc=None):
+        out=[]; scores=[]
         with stage_progress(desc,len(rows),unit="img") as bar:
             for start in range(0,len(rows),self.args.batch):
                 x=[padim_input(r) for r in rows[start:start+self.args.batch]]
@@ -646,19 +638,27 @@ class Padim:
                 d=(f-self.mu).unsqueeze(-1)
                 z=torch.linalg.solve_triangular(self.chol,d,upper=False)
                 score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
-                score=restore_padim_map(score,(top,left,h,w),x[0].shape[-2:],self.args.padim_size,self.upsample_factor)
-                out.extend(ndimage.gaussian_filter(a, self.args.padim_smooth) for a in score[:,0].cpu().numpy())
+                native_map,pred_score=padim_prediction_maps(
+                    score,(top,left,h,w),x[0].shape[-2:],self.args.padim_size,
+                    self.upsample_factor,self.args.padim_smooth)
+                out.extend(native_map[:,0].cpu().numpy())
+                scores.extend(pred_score.cpu().numpy())
                 bar.update(len(x))
-        return np.asarray(out)
+        return np.asarray(out),np.asarray(scores)
+
+    def maps(self,rows,desc=None):
+        """Native maps only (legacy helpers); evaluation must use predict()."""
+        return self.predict(rows,desc=desc)[0]
 
 class SkipExperiment(Exception):
     pass
 
 def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_scale=4,
-              collect_comparison=False, desc=None):
+              collect_comparison=False, desc=None, raw_image_scores=None):
     dest=out/split
     dest.mkdir(exist_ok=True)
-    scores, normalized, pred_labels, _=post_process(maps,calibration)
+    raw_scores=get_raw_image_scores(maps,raw_image_scores,calibration=calibration)
+    scores, normalized, pred_labels, _=post_process(maps,calibration,raw_image_scores=raw_scores)
     # Save a single visual artifact per image. Numeric maps are opt-in for diagnostics.
     evidence = []
     if collect_comparison:
@@ -667,9 +667,9 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_sca
         from comparison_metrics import sample_evidence, write_evidence
     with stage_progress(desc,len(rows),unit="img") as bar, (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
         writer=csv.writer(f)
-        writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer"])
-        for r,m,norm,score,flag in zip(rows,maps,normalized,scores,pred_labels):
-            writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(score),int(flag),float(m.max()),r.get("wafer", "")])
+        writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer","native_map_max"])
+        for r,m,norm,score,flag,raw_score in zip(rows,maps,normalized,scores,pred_labels,raw_scores):
+            writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(score),int(flag),float(raw_score),r.get("wafer", ""),float(m.max())])
             if save_raw_maps:
                 np.save(dest/(r["id"]+".npy"),m)
                 np.save(dest/(r["id"]+"_normalized.npy"),norm)
@@ -749,43 +749,46 @@ def run_protocol(parts,args,device,out):
                     adapt_backbone(model.net,exp,parts,args,device,dest)
                 model.fit([r for r in parts["train"] if r["label"]==0],desc=f"{label} Gaussian fit")
                 checkpoint=dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,map_restore=PADIM_MAP_RESTORE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
-                predict=model.maps
+                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,map_restore=PADIM_MAP_RESTORE,image_score_source=PADIM_IMAGE_SCORE_SOURCE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
+                predict=model.predict
             else:
-                predict=train_cnn(exp,parts,args,device,dest)
+                cnn_predict=train_cnn(exp,parts,args,device,dest)
+                predict=lambda rows,desc=None: (cnn_predict(rows,desc=desc),None)
                 checkpoint=torch.load(dest/"model.pt",map_location="cpu",weights_only=True)
             LOG.info("[Final validation] images=%d",len(parts["val"]))
-            vm=predict(parts["val"],desc=f"{label} validation")
+            vm,vs=predict(parts["val"],desc=f"{label} validation")
             if not np.isfinite(vm).all():
                 raise ValueError("Nonfinite validation predictions")
-            calibration=calibrate_post_processor(parts["val"],vm)
+            calibration=calibrate_post_processor(parts["val"],vm,raw_image_scores=vs)
             th=NORMALIZED_THRESHOLD
             checkpoint["post_processor"]=calibration
             torch.save(checkpoint,dest/"model.pt")
             (dest/"threshold.json").write_text(json.dumps(calibration,indent=2,allow_nan=False),encoding="utf-8")
-            LOG.info("[Post processor] validation image threshold=%.6g min=%.6g max=%.6g | pixel threshold=%.6g min=%.6g max=%.6g",
+            LOG.info("[Post processor] source=%s validation image threshold=%.6g min=%.6g max=%.6g | pixel threshold=%.6g min=%.6g max=%.6g",
+                     calibration["image_score_source"],
                      calibration["image_threshold"],calibration["image_min"],calibration["image_max"],
                      calibration["pixel_threshold"],calibration["pixel_min"],calibration["pixel_max"])
             LOG.info("[Test] images=%d normalized threshold=%.6g (fixed from validation)",len(parts["test"]),th)
-            tm=predict(parts["test"],desc=f"{label} test")
+            tm,ts=predict(parts["test"],desc=f"{label} test")
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
             with stage_progress(f"{label} metrics",2,unit="split") as bar:
-                val=metrics(parts["val"],vm,th,"val",calibration)
+                val=metrics(parts["val"],vm,th,"val",calibration,raw_image_scores=vs)
                 bar.update(1)
-                test=metrics(parts["test"],tm,th,"test",calibration)
+                test=metrics(parts["test"],tm,th,"test",calibration,raw_image_scores=ts)
                 bar.update(1)
             LOG.info("[Save] val/test 3-panel PNGs and CSV%s", " + diagnostic NPY maps" if args.save_raw_maps else "")
             save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps,
-                      panel_scale=args.panel_scale,desc=f"{label} save val")
+                      panel_scale=args.panel_scale,desc=f"{label} save val",raw_image_scores=vs)
             save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps,
                       panel_scale=args.panel_scale, collect_comparison=getattr(args,"padim_suite",False),
-                      desc=f"{label} save test")
+                      desc=f"{label} save test",raw_image_scores=ts)
             result=dict(experiment=exp,status="ok",threshold=th,post_processor=calibration,val=val,test=test)
             if getattr(args,"padim_suite",False):
                 from padim_backbone import operating_points
                 # Retain the original shared-raw-threshold sweep as a diagnostic, independent of the calibrated decisions.
-                points=operating_points(parts["val"],vm,parts["test"],tm,None)
+                points=operating_points(parts["val"],vm,parts["test"],tm,None,
+                                        val_image_scores=vs,test_image_scores=ts)
                 result["operating_points"]=points
                 (dest/"operating_points.json").write_text(json.dumps(points,indent=2,allow_nan=False),encoding="utf-8")
                 if (dest/"backbone_summary.json").is_file():
@@ -896,10 +899,11 @@ def main(padim_suite=False):
     args.native_shape=list(rows[0]["x"].shape)
     args.padim_backbone=PADIM_BACKBONE
     args.padim_map_restore=PADIM_MAP_RESTORE
+    args.padim_image_score_source=PADIM_IMAGE_SCORE_SOURCE
     LOG.info("Native image shape (H,W): %s",tuple(args.native_shape))
     input_shape=tuple(v*args.upsample_factor for v in args.native_shape) if args.upsample_factor is not None else (args.padim_size,)*2
     args.padim_input_shape=list(input_shape)
-    LOG.info("[PaDiM config] input=%s factor=%s depth=%d n_features=%d padding=%s map_restore=%s",input_shape,args.upsample_factor,args.max_layer_depth,args.padim_dim,args.upsample_factor is None,PADIM_MAP_RESTORE)
+    LOG.info("[PaDiM config] input=%s factor=%s depth=%d n_features=%d padding=%s map_restore=%s image_score_source=%s",input_shape,args.upsample_factor,args.max_layer_depth,args.padim_dim,args.upsample_factor is None,PADIM_MAP_RESTORE,PADIM_IMAGE_SCORE_SOURCE)
     device=torch.device(("cuda" if torch.cuda.is_available() else "cpu") if args.device=="auto" else args.device)
     LOG.info("[Device] %s | %s",torch.cuda.get_device_name(device) if device.type=="cuda" else "CPU",gpu_memory(device))
     LOG.info("[Config] epochs=%d batch=%d lr=%g seed=%d recall=%s region_recall=%s",
