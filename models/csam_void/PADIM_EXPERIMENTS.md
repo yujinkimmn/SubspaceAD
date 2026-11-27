@@ -126,20 +126,17 @@ Manifest는 `image,mask,label,split,equipment,lot` 열을 사용한다. 0은 확
 - Train / val / test는 미리 지정하며 동일 root lot이 여러 split에 섞이지 않아야 한다.
 - 같은 pixel 데이터의 중복을 검사한다. 각 split에 정상과 void가 있어야 한다.
 - **Pooled:** 모든 설비의 지정 train/val/test를 합쳐 일반적인 성능을 평가한다.
-- **Holdout:** 설비 하나를 train/val에서 제외하고 그 설비의 지정 test만 평가한다. 학습하지 않은 설비로 일반화하는지 확인한다.
+- **Holdout:** 설비 하나를 train/val에서 제외하고 그 설비의 지정 test만 평가한다. 학습하지 않은 설비로 일반화하는지 확인한다. MixStyle은 fold별 적격 train 설비가 최소 2개 필요하며, 미달 시 모델 초기화 전에 해당 조건을 skip한다.
 
 Pooled와 각 holdout은 데이터 조건이 다르다. 반드시 같은 protocol 안의 P0–P5를 비교하며 test 결과로 학습 방법/threshold를 다시 고르지 않는다.
 
 ## 5. Threshold 및 평가 지표
 
-각 모델/프로토콜의 validation에서 축소 전 model input map의 최댓값인 image raw score와 native pixel raw map에 대해 각각 F1-adaptive threshold, min, max를 계산하고 독립적으로 정규화한다.
+각 모델의 validation에서 이미지와 픽셀의 raw 임계값을 독립적으로 정하고 test에서 재사용한다.
 
-```text
-normalized = clip((raw_score - threshold) / (max - min) + 0.5, 0, 1)
-prediction = normalized > 0.5
-```
-
-따라서 0.5는 정상/불량을 구분하는 정규화된 기준이며, 서로 다른 모델의 raw score 값이나 raw threshold가 동일하다는 뜻이 아니다. Test에서는 validation의 값만 재사용한다. Image pred_label과 pixel pred_mask는 독립적으로 생성한다.
+- 이미지 임계값은 `--recall`(기본 0.95)을 달성하는 가장 높은 점수다.
+- 픽셀 임계값은 관측된 1px 및 2–4px 영역 각각에서 `--region-recall`(기본 0.90)을 달성하는 가장 높은 점수다. 그 임계값에서도 배경 pixel FPR이 `--pixel-fpr-cap`(기본 0.05)을 넘으면 해당 후보는 선택 대상에서 제외된다. 영역 목표를 0으로 끄거나 해당 GT가 전혀 없으면 pixel F1을 최대화하는 임계값을 배경 FPR 한도까지 올린다.
+- 판정은 `raw_score >= raw_threshold`를 사용한다. 0~1 정규화는 시각화와 CSV 표시용이다. AUROC 및 AUPRO는 raw 점수를 사용한다.
 
 | Split | Metric | 의미 |
 |---|---|---|
@@ -163,14 +160,7 @@ prediction = normalized > 0.5
 
 ### Selected model의 의미
 
-선정 모델은 protocol 안에서 validation 결과만으로 아래 순서대로 비교한 후보이다.
-
-1. 1px/2–4px 중 관측된 구간의 가장 낮은 region recall이 목표(기본 90%)에 미달하는 정도가 작은 모델.
-2. Worst equipment FPR이 낮은 모델.
-3. 전체 FPR이 낮은 모델.
-4. Dice가 높은 모델.
-
-Test 성능 최고 모델이나 Image AUROC 최고 모델을 뜻하지 않는다. Image recall 95%/small-region recall 90%는 목표이며, F1-adaptive 최종 threshold에서 두 목표를 자동으로 달성하지는 않는다. 크기별 정답 영역이 없는 경우 해당 region metric은 N/A로 처리한다.
+선정은 protocol별 validation에서만 수행한다. 이미지 recall, 크기별 region recall 및 배경 pixel FPR 한도를 모두 충족한 후보 중 worst-equipment FPR, 전체 FPR, Dice 순으로 선택한다. 활성화된 크기 구간에 GT가 없으면 해당 조건은 N/A이며, 모든 조건을 검증하고 충족한 후보가 없으면 `selected.json`은 null을 기록한다. 각 후보의 조건 충족 여부와 test 평가는 계속 보고한다.
 
 ### Recall–FPR trade-off
 
@@ -180,7 +170,7 @@ Test 성능 최고 모델이나 Image AUROC 최고 모델을 뜻하지 않는다
 - 같은 validation FPR ceiling 5%에서 어느 방법이 1px/2–4px를 더 많이 검출하는가?
 - Validation에서 결정한 threshold를 그대로 test에 적용했을 때 위 장점이 유지되는가?
 
-이 곡선의 threshold는 최종 정규화 0.5와 다른 raw diagnostic threshold이며, test 곡선은 진단용이다.
+이 곡선은 image/pixel에 하나의 공통 raw threshold를 적용하는 진단이다. 최종 판정은 별도로 산출한 두 임계값을 사용한다.
 
 ## 6. 어떤 비교를 통해 결론을 내릴까?
 
@@ -191,6 +181,10 @@ Test 성능 최고 모델이나 Image AUROC 최고 모델을 뜻하지 않는다
 | P0 → P3 | Normal-only consistency가 정상 설비 편차를 줄이는가? |
 | P3 → P4 | Normal-only 학습에서도 MixStyle이 추가 효과를 주는가? |
 | P2 → P5 | 정확한 pixel supervision이 작은 void 검출을 개선하는가? |
+
+추가 실험 `p5_pixel_no_mixstyle`은 P1에 P5와 동일한 pixel loss를 추가한다. P1↔이 실험, P2↔P5를 함께 보면 MixStyle 유무별 pixel supervision 효과를 확인할 수 있다. P3/P4는 동일 seed에서 같은 batch·photometric augmentation을 사용하고 MixStyle 난수는 별도로 생성한다.
+
+`p0_direct_native`는 P0와 같은 Gaussian 및 model-input image score를 사용하고 픽셀 map만 native feature grid에서 직접 가져온다. 원본 4배 입력 및 smoothing 0에서 실행할 수 있다. 기존 P0와 같은 실행에서 `--experiments p0_pretrained p0_direct_native`로 비교한다.
 
 P0 대비 P2/P4/P5의 개선 여부만 보면 여러 요소가 동시에 바뀌었으므로 MixStyle만의 효과라고 해석할 수 없다. 먼저 validation에서 matched pair로 원인을 분리한다. FPR 감소와 작은 영역 recall을 함께 비교하고, test 및 holdout의 독립 결과로 일반화 여부를 확인한다. AUROC 차이가 작더라도 특정 FPR/recall operating point에서 차이가 클 수 있다.
 
@@ -234,7 +228,7 @@ python models/csam_void/run_padim.py --manifest D:/csam_data/manifest.csv --out 
 
 ### P0 대비 개선 효과를 입증하는 비교 보고서
 
-`comparison.html`은 P0와 P1–P5를 각각 동일 test 이미지와 GT mask에서 비교한다. 이전에 잡던 void 영역을 놓쳤는지(동일 GT region의 유지/유실/신규 검출, 1px/2–4px/5+px별 집계), 설비 차이에 의한 background FP가 감소했는지(정상 image FPR, GT 외부 pixel FPR, normalized score 분포, 설비별 최대값/범위) 모두 보여준다. Validation에서 정한 동일 목표 recall/FPR에서의 operating point도 확인한다. 예를 들어 P0와 P2가 각각 100개 void를 검출해 recall이 같더라도, P0에서 검출한 5개를 놓치고 다른 5개를 새로 검출했다면 유지율은 95%이다.
+`comparison.html`은 P0와 P1–P5를 각각 동일 test 이미지와 GT mask에서 비교한다. 이전에 잡던 void 영역을 놓쳤는지(동일 GT region의 유지/유실/신규 검출, 1px/2–4px/5+px별 집계), 설비 차이에 의한 background FP가 감소했는지(정상 image FPR, GT 외부 pixel FPR, normalized score 분포, 설비별 최대값/범위) 모두 보여준다. 정상 이미지 수와 크기별 GT 영역 수, 그리고 동일 root lot을 재표집한 PaDiM 후보 − P0 차이의 95% 구간도 확인할 수 있다. 유효 lot이 2개 미만인 지표는 구간을 N/A로 표시한다. Validation에서 정한 목표 recall/FPR의 진단 operating point도 제공한다. 예를 들어 P0와 P2가 각각 100개 void를 검출해 recall이 같더라도, P0에서 검출한 5개를 놓치고 다른 5개를 새로 검출했다면 유지율은 95%이다.
 
 정성 사례는 개선, 기존 void 유실, 새 void 검출, 과검출 악화를 자동 분류하여 P0/후보의 같은 이미지 3-panel을 함께 보여준다. 실제 이미지가 내장되므로 사내에서만 취급한다. 기존 개선 보고서를 다시 생성할 때:
 

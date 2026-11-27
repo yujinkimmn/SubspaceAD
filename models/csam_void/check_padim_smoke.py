@@ -30,14 +30,14 @@ def main():
         old=args.baseline/name/"exp0_padim"
         base=out/"p0_pretrained"
         for split in ("val","test"):
-            files=list((old/split).glob("*.npy"))
+            files=[f for f in (old/split).glob("*.npy") if not f.stem.endswith("_normalized")]
             assert files, "Run both P0 and Exp0 smoke tests with --save-raw-maps"
-            assert {f.name for f in files}=={f.name for f in (base/split).glob("*.npy")}
+            assert {f.name for f in files}=={f.name for f in (base/split).glob("*.npy") if not f.stem.endswith("_normalized")}
             for f in files:
                 np.testing.assert_allclose(np.load(f),np.load(base/split/f.name),rtol=1e-6,atol=1e-6)
             def read_scores(path):
                 with path.open(newline="",encoding="utf-8") as f:
-                    return [(r["id"],float(r["raw_score"]),float(r["score"]),int(r["prediction"]))
+                    return [(r["id"],float(r["raw_score"]))
                             for r in csv.DictReader(f)]
             a,b=read_scores(old/split/"scores.csv"),read_scores(base/split/"scores.csv")
             assert [r[0] for r in a]==[r[0] for r in b]
@@ -70,7 +70,7 @@ def main():
                 if point["kind"]=="fpr_ceiling":
                     assert point["val"]["fpr"]<=point["target"]+1e-7
             print(name,exp,"OK")
-    print("P0 equivalence and P0-P5 backbone/threshold artifacts verified")
+    print("P0 raw score/map equivalence and P0-P5 backbone/threshold artifacts verified")
 
 if __name__=="__main__":
     main()

@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 METRICS = ("recall","fpr","worst_equipment_fpr","underkill","dice","iou","auroc","image_auroc","pixel_auroc","image_f1","pixel_aupro",
-           "fp_regions_per_normal","tp","fp","tn","fn")
+           "fp_regions_per_normal","pixel_fpr","bg_fp","bg_pixels","tp","fp","tn","fn")
 SIZES = ("1px","2-4px","5+px")
 CSS = """
 *{box-sizing:border-box}body{font:15px/1.5 system-ui,sans-serif;background:#f6f8fb;color:#172332;margin:0}
@@ -53,11 +53,11 @@ def metric_cells(m):
     return [percent(m.get("recall")),percent(m.get("fpr")),percent(m.get("worst_equipment_fpr")),
             percent(m.get("underkill")),numeric(m.get("dice")),numeric(m.get("iou")),
             numeric(m.get("image_auroc",m.get("auroc"))),numeric(m.get("pixel_auroc")),
-            numeric(m.get("image_f1")),numeric(m.get("pixel_aupro")),numeric(m.get("fp_regions_per_normal")),
+            numeric(m.get("image_f1")),numeric(m.get("pixel_aupro")),numeric(m.get("fp_regions_per_normal")),percent(m.get("pixel_fpr")),
             *[percent(region(m,k)) for k in SIZES],
             *[numeric(m.get(k)) for k in ("tp","fp","tn","fn")]]
 
-HEAD = ["Recall","FPR","Worst FPR","Underkill","Dice","IoU","Image AUROC","Pixel AUROC","Image F1","Pixel AUPRO@0.30","FP regions / normal",
+HEAD = ["Recall","FPR","Worst FPR","Underkill","Dice","IoU","Image AUROC","Pixel AUROC","Image F1","Pixel AUPRO@0.30","FP regions / normal","Background pixel FPR",
         "1px recall","2–4px recall","5+px recall","TP","FP","TN","FN"]
 
 PADIM_EXPERIMENTS = (
@@ -67,6 +67,8 @@ PADIM_EXPERIMENTS = (
     ("p3_consistency", "Normal consistency", "정상 이미지의 밝기·대비 등이 변해도 원래 teacher feature에 가깝도록 학습한다."),
     ("p4_consistency_mixstyle", "P3 + MixStyle", "정상 consistency 학습에 cross-equipment MixStyle을 추가한다."),
     ("p5_pixel_mixstyle", "P2 + Pixel supervision", "실제 void mask까지 활용해 작은 불량의 위치 정보를 보존하도록 학습한다."),
+    ("p5_pixel_no_mixstyle", "P1 + Pixel supervision (선택 실행)", "MixStyle 없이 pixel loss의 효과를 측정한다."),
+    ("p0_direct_native", "P0 + native map 직접 사용 (선택 실행)", "Image score를 고정하고 pixel map 복원의 영향을 측정한다."),
 )
 
 def table(headers,rows):
@@ -97,9 +99,8 @@ def reading_guide():
         "<div class='callout'><strong>예시 (설명용 가상 수치):</strong> 정상 100장 중 5장을 잘못 검출하면 FPR 5%, "
         "실제 불량 20장 중 19장을 검출하면 image recall 95%이다. "
         "그러나 실제 1px 불량 영역 10개 중 6개만 맞추었다면 1px region recall은 60%이다.</div>"
-        "<p class='note'>★ 선정 순서: validation의 1px/2–4px region recall 목표 미달 정도 최소화 → "
-        "설비별 FPR 최댓값 최소화 → 전체 FPR 최소화 → Dice 최대화. "
-        "Image recall 목표는 참고용이며 최종 F1-adaptive threshold가 목표 충족을 보장하지 않는다. "
+        "<p class='note'>새 PaDiM 실험에서는 validation의 image recall, 작은 영역 recall, "
+        "배경 pixel FPR 조건을 모두 충족한 모델 중 설비별 FPR 최댓값, 전체 FPR, Dice 순으로 선택한다. "
         "ok = 완료, partial = 일부 실험 미완료, skipped = 실행 조건 미충족, failed = 오류, — = 측정 불가/미기록(0이 아님).</p></section>"
     )
 
@@ -119,7 +120,7 @@ def metric_guide():
     ]
     return ("<section id='metric-guide' class='guide'><h2>지표 사전: 어떤 숫자를 봐야 할까?</h2>"
             "<p>Image 지표는 이미지 전체의 정상/불량 판정을, pixel 및 region 지표는 불량의 위치를 평가한다. "
-            "Validation AUROC는 raw score, test pixel AUROC/AUPRO는 validation으로 정규화한 map을 사용한다. "
+            "새 결과의 validation/test AUROC와 test AUPRO는 raw score로 계산한다. 기존 저장 결과에는 당시 산식이 적용되어 있다. "
             "Image와 pixel은 각각 독립적인 threshold를 사용한다. ↑ 높을수록 좋음, ↓ 낮을수록 좋음.</p>"
             +table(["지표","의미"],[(list(r),False) for r in definitions])+"</section>")
 
@@ -151,16 +152,22 @@ def padim_comparison(results):
         ("p1_classification","p2_classification_mixstyle","Classification에 MixStyle 추가"),
         ("p0_pretrained","p3_consistency","Normal consistency 효과"),
         ("p3_consistency","p4_consistency_mixstyle","Consistency에 MixStyle 추가"),
-        ("p2_classification_mixstyle","p5_pixel_mixstyle","Pixel supervision 추가"),
+        ("p2_classification_mixstyle","p5_pixel_mixstyle","MixStyle 사용 시 pixel supervision 효과"),
+        ("p1_classification","p5_pixel_no_mixstyle","MixStyle 없이 pixel supervision 효과"),
+        ("p5_pixel_no_mixstyle","p5_pixel_mixstyle","Pixel supervision 사용 시 MixStyle 효과"),
+        ("p0_pretrained","p0_direct_native","Pixel map 복원 효과"),
     )
     rows=[]
+    labels = {"p5_pixel_no_mixstyle": "P5 (no MixStyle)", "p0_direct_native": "P0 (direct native)"}
     for baseline,experiment,question in pairs:
         if baseline not in by_name or experiment not in by_name:
             continue
         a,b=by_name[baseline],by_name[experiment]
         valid=a.get("status")=="ok" and b.get("status")=="ok"
         va,vb=a.get("val",{}),b.get("val",{})
-        cells=[f"{baseline.split('_')[0].upper()} → {experiment.split('_')[0].upper()}",question]
+        a_label = labels.get(baseline, baseline.split("_")[0].upper())
+        b_label = labels.get(experiment, experiment.split("_")[0].upper())
+        cells=[f"{a_label} → {b_label}",question]
         cells.extend([delta(va,vb,get) if valid else "—" for get in (
             lambda m:m.get("fpr"),lambda m:m.get("worst_equipment_fpr"),
             lambda m:m.get("recall"),lambda m:region(m,"1px"),lambda m:region(m,"2-4px"))])
@@ -170,7 +177,7 @@ def padim_comparison(results):
     return ("<h3>실험별 학습 효과 비교 (validation)</h3>"
             "<p>비교 실험 값 − 기준 실험 값. 단위 pp는 percentage point(퍼센트포인트)이다. "
             "예: FPR 10% → 5%이면 −5.00 pp. FPR은 음수, recall은 양수 방향이 좋다. "
-            "각 모델은 자기 validation으로 보정한 threshold에서 비교하므로 같은 recall 조건의 비교는 아래 Recall–FPR 곡선을 확인한다. "
+            "각 모델은 자기 validation으로 보정한 threshold에서 비교하므로 최종 선정 조건과 실제 validation recall도 함께 확인한다. "
             "실험이 실패했거나 지표가 없으면 —로 표시한다.</p>"
             +table(["비교","검증하는 효과","Δ FPR ↓","Δ Worst FPR ↓","Δ Image Recall ↑","Δ 1px Recall ↑","Δ 2–4px Recall ↑"],rows))
 
@@ -329,6 +336,16 @@ def build_report(root,index=None):
         section.append("<p class='note'>먼저 Test FPR, Recall 및 작은 영역 Recall 차트를 확인하고, "
                        "그다음 표에서 validation/test와 설비별 수치를 비교한다. "
                        "아래 test 결과는 독립 평가 결과이며 모델을 다시 선택하는 기준이 아니다.</p>")
+        operating_results = [r for r in results if "validation_constraints" in r]
+        if operating_results:
+            section.append(f"<p>Validation background pixel FPR cap: {percent(config.get('pixel_fpr_cap'))}. "
+                           + ("</p>" if best else "No candidate met all validation constraints.</p>"))
+            checks = sorted({k for r in operating_results for k in r["validation_constraints"]})
+            status_text = {True: "충족", False: "미달", None: "GT 없음"}
+            section.append(table(["Experiment",*checks], [
+                ([r["experiment"],*[status_text[r["validation_constraints"][k]]
+                   if k in r["validation_constraints"] else "—" for k in checks]],r["experiment"]==best)
+                for r in operating_results]))
         section.append(chart_group(results))
         section.append(padim_comparison(results))
         section.append(tradeoff_section(results))
@@ -336,10 +353,13 @@ def build_report(root,index=None):
         if post:
             keys=("image_threshold","image_min","image_max","pixel_threshold","pixel_min","pixel_max")
             section.append("<details><summary>Validation-calibrated post-processing · threshold 세부값</summary>"
-                           "<p class='note'>Validation에서 image/pixel 각각 F1-adaptive threshold와 min/max를 구하고 "
-                           "이를 사용해 score를 0~1로 정규화한다. 최종 0.5 초과를 불량으로 판정한다. "
-                           "이 값은 test에서 재계산하지 않으며, F1 기준이 recall 목표를 보장하지 않는다.</p>"+
-                           table(["Experiment",*keys], [([r["experiment"],*[numeric(r["post_processor"].get(k)) for k in keys]],r["experiment"]==best) for r in post])+"</details>")
+                           "<p class='note'>새 판정은 image/pixel raw score가 각 임계값 이상이면 불량으로 판정한다. "
+                           "정규화는 표시용이고, test에서도 validation 임계값을 그대로 쓴다.</p>"+
+                           table(["Experiment","Calibration","Decision rule",*keys], [
+                               ([r["experiment"],r["post_processor"].get("method"),
+                                 r["post_processor"].get("decision_rule","normalized_gt"),
+                                 *[numeric(r["post_processor"].get(k)) for k in keys]],r["experiment"]==best)
+                               for r in post])+"</details>")
         if "padim_input_shape" in config:
             section.append(f"<p>PaDiM input (H,W): {esc(config['padim_input_shape'])}; "
                            f"upsample factor: {esc(config.get('upsample_factor') or 'square letterbox')}; "

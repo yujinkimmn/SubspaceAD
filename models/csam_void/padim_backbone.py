@@ -8,31 +8,37 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from scipy import ndimage
 from sklearn.metrics import roc_auc_score
 from csam_progress import stage_progress, epoch_note
 from run import (LOG, SkipExperiment, domain_aug, elapsed, gpu_memory, loss_fn,
                  padim_input, padim_preprocess, restore_head_logits)
-from score_processing import get_raw_image_scores
+from score_processing import get_raw_image_scores, region_peaks
 
 PEXPS = ["p0_pretrained", "p1_classification", "p2_classification_mixstyle",
          "p3_consistency", "p4_consistency_mixstyle", "p5_pixel_mixstyle"]
+PIXEL_NO_MIX = "p5_pixel_no_mixstyle"
+DIRECT_P0 = "p0_direct_native"
+SUPERVISED = {PEXPS[1], PEXPS[2], PEXPS[5], PIXEL_NO_MIX}
+MIXSTYLE = {PEXPS[2], PEXPS[4], PEXPS[5]}
+PIXEL_LOSS = {PEXPS[5], PIXEL_NO_MIX}
 
 class CrossMix(nn.Module):
-    def __init__(self, p=.5, alpha=.1):
+    def __init__(self, p=.5, alpha=.1, *, seed=None):
         super().__init__()
         self.p, self.alpha, self.applied = p, alpha, 0
+        self.rng = np.random.default_rng(seed)
 
     def forward(self, x, domains):
-        if not self.training or self.p == 0 or random.random() >= self.p:
+        if not self.training or self.p == 0 or self.rng.random() >= self.p:
             return x
         partners = [[j for j,d in enumerate(domains) if d != own] for own in domains]
         if not partners or not all(partners):
             return x
-        perm = torch.tensor([random.choice(ids) for ids in partners], device=x.device)
+        perm = torch.as_tensor([self.rng.choice(ids) for ids in partners], device=x.device, dtype=torch.long)
         mu = x.mean((2,3),keepdim=True).detach()
         std = (x.var((2,3),unbiased=False,keepdim=True)+1e-6).sqrt().detach()
-        lam = torch.distributions.Beta(self.alpha,self.alpha).sample((len(x),1,1,1)).to(x.device)
+        lam = torch.as_tensor(self.rng.beta(self.alpha, self.alpha, (len(x), 1, 1, 1)),
+                              device=x.device, dtype=x.dtype)
         self.applied += 1
         return (x-mu)/std*(lam*std+(1-lam)*std[perm])+lam*mu+(1-lam)*mu[perm]
 
@@ -108,14 +114,22 @@ def proxy_eval(net,head,teacher,rows,args,device,supervised,batch_done=None):
                 "head_pixel_dice_at_0.5":2*inter/(predpix+truepix) if predpix+truepix else None}
     return {"fixed_photometric_consistency_loss":sum(n*v for n,v in losses)/sum(n for n,v in losses)}
 
+def adaptation_domains(exp, rows):
+    if exp not in MIXSTYLE:
+        return None
+    labels = (0, 1) if exp in SUPERVISED else (0,)
+    return sorted({r["equipment"] for r in rows if r["label"] in labels})
+
+
 def adapt_backbone(net,exp,parts,args,device,out):
-    idx=PEXPS.index(exp)
-    if idx==0:
+    if exp in (PEXPS[0], DIRECT_P0):
         return
-    supervised=idx in (1,2,5)
-    use_mix=idx in (2,4,5)
-    train=[r for r in parts["train"] if r["label"] in ((0,1) if supervised else (0,))]
-    val=[r for r in parts["val"] if r["label"] in ((0,1) if supervised else (0,))]
+    supervised = exp in SUPERVISED
+    use_mix = exp in MIXSTYLE
+    labels = (0, 1) if supervised else (0,)
+    train = [r for r in parts["train"] if r["label"] in labels]
+    val = [r for r in parts["val"] if r["label"] in labels]
+    photometric_rng = random.Random(args.seed)
     if use_mix and len({r["equipment"] for r in train})<2:
         raise SkipExperiment("Cross-equipment MixStyle requires >=2 training equipment domains")
     if not train or not val:
@@ -132,7 +146,7 @@ def adapt_backbone(net,exp,parts,args,device,out):
             module.eval().requires_grad_(False)
     net.eval()  # BN fixed; eval mode does NOT disable gradients.
     head=LocalHead(args.max_layer_depth).to(device) if supervised else None
-    mix=CrossMix(args.mix_prob,args.mix_alpha).to(device) if use_mix else None
+    mix=CrossMix(args.mix_prob,args.mix_alpha,seed=args.seed).to(device) if use_mix else None
     groups=[{"params":[p for p in net.parameters() if p.requires_grad],"lr":args.backbone_lr}]
     if head is not None: groups.append({"params":head.parameters(),"lr":args.head_lr})
     opt=torch.optim.AdamW(groups,weight_decay=1e-4)
@@ -157,10 +171,10 @@ def adapt_backbone(net,exp,parts,args,device,out):
                     logits=head(layers(net,clean,mix,domains,args.max_layer_depth),crop,args.padim_size,y.shape[-2:],args.upsample_factor)
                     labels=torch.tensor([r["label"] for r in rr],device=device,dtype=clean.dtype)
                     task=F.binary_cross_entropy_with_logits(logits.flatten(1).amax(1),labels)
-                    anchor=loss_fn(logits,y,hard=True) if idx==5 else task.new_zeros(())
+                    anchor=loss_fn(logits,y,hard=True) if exp in PIXEL_LOSS else task.new_zeros(())
                     loss=task+args.pixel_weight*anchor
                 else:
-                    augmented,_,_=tensors(rr,args,device,domain_aug)
+                    augmented,_,_=tensors(rr,args,device,lambda x: domain_aug(x, photometric_rng))
                     with torch.no_grad(): target=layers(teacher,clean,depth=args.max_layer_depth)
                     task=consistency(layers(net,augmented,mix,domains,args.max_layer_depth),target)
                     anchor=consistency(layers(net,clean,depth=args.max_layer_depth),target)
@@ -212,11 +226,8 @@ def score_samples(rows,maps,raw_image_scores=None):
     scores=get_raw_image_scores(maps,raw_image_scores)
     for r,m,score in zip(rows,maps,scores):
         groups["positive" if r["label"]==1 else "normal"].append(float(score))
-        lab,n=ndimage.label(r["y"]>0,structure=np.ones((3,3)))
-        for j in range(1,n+1):
-            obj=lab==j
-            area=obj.sum()
-            groups["1px" if area==1 else "2-4px" if area<=4 else "5+px"].append(float(m[obj].max()))
+        for area, peak in region_peaks(r["y"] > 0, m):
+            groups["1px" if area==1 else "2-4px" if area<=4 else "5+px"].append(float(peak))
     return {k:np.sort(np.asarray(v,dtype=np.float64)) for k,v in groups.items()}
 
 def rates(groups,threshold):

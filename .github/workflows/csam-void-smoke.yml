@@ -39,13 +39,13 @@ jobs:
         run: |
           python models/csam_void/run.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_results --epochs 2 --min-steps 2 --padim-size 64 --max-layer-depth 3 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --save-raw-maps --experiments exp0_padim exp1_cnn exp2_normals exp3_hard_negative exp4_copy_paste exp5_domain_aug exp6_mixstyle
           python models/csam_void/check_smoke.py /tmp/csam_results
-      - name: P0-P5 backbone adaptation and P0 equivalence
+      - name: P0-P5 backbone adaptation and P0 raw output equivalence
         run: |
           python models/csam_void/run_padim.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_padim --epochs 1 --min-steps 2 --padim-size 64 --max-layer-depth 3 --padim-dim 16 --padim-weights /tmp/csam_resnet18.pt --protocol both --device cpu --mix-prob 1 --save-raw-maps
           python models/csam_void/check_padim_smoke.py /tmp/csam_padim --baseline /tmp/csam_results
-      - name: P0-P5 default native 4x depth2 feature40
+      - name: P0-P5 and optional ablations at native 4x depth2 feature40
         run: |
-          python models/csam_void/run_padim.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_padim_best --epochs 1 --min-steps 1 --batch 2 --protocol pooled --device cpu --mix-prob 1 --padim-weights /tmp/csam_resnet18.pt
+          python models/csam_void/run_padim.py --manifest /tmp/csam_demo/manifest.csv --out /tmp/csam_padim_best --epochs 1 --min-steps 1 --batch 2 --protocol pooled --device cpu --mix-prob 1 --padim-weights /tmp/csam_resnet18.pt --experiments p0_pretrained p1_classification p2_classification_mixstyle p3_consistency p4_consistency_mixstyle p5_pixel_mixstyle p5_pixel_no_mixstyle p0_direct_native
           python models/csam_void/check_best_config.py /tmp/csam_padim_best
       - name: Semi-supervised smoke test
         run: |
