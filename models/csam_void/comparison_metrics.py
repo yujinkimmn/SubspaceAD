@@ -9,13 +9,13 @@ from scipy import ndimage
 SCHEMA_VERSION = 1
 
 
-def sample_evidence(row, normalized_map, image_prediction, threshold=.5):
+def sample_evidence(row, normalized_map, image_prediction, threshold=.5, *, prediction_mask=None):
     """Native-grid region hits and background counts, without storing score maps."""
     gt = np.asarray(row["y"]) > 0
     norm = np.asarray(normalized_map)
     if norm.shape != gt.shape or not np.isfinite(norm).all() or np.any((norm < 0) | (norm > 1)):
         raise ValueError("Comparison requires finite native anomaly maps aligned to GT")
-    pred = norm > threshold
+    pred = norm > threshold if prediction_mask is None else np.asarray(prediction_mask, dtype=bool)
     labels, count = ndimage.label(gt, structure=np.ones((3, 3), dtype=np.uint8))
     areas = np.bincount(labels.ravel(), minlength=count+1)
     overlap = np.bincount(labels[pred], minlength=count+1)

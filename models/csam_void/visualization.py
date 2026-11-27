@@ -27,13 +27,15 @@ def panel_metadata_lines(row, prediction=None, image_score=None):
     return lines
 
 
-def save_panel(x, score, threshold, path, metadata=None, *, scale=4):
+def save_panel(x, score, threshold, path, metadata=None, *, scale=4, prediction_mask=None):
     """Display native pixels as exact integer-sized blocks (no interpolation)."""
     if not isinstance(scale, int) or not 1 <= scale <= 16:
         raise ValueError("panel scale must be an integer from 1 to 16")
     h, w = x.shape
     original = (np.clip(x, 0, 1) * 255).astype(np.uint8)
-    mask = ((score > threshold) * 255).astype(np.uint8)
+    if prediction_mask is None:
+        prediction_mask = score > threshold
+    mask = (prediction_mask * 255).astype(np.uint8)
     panels = [Image.fromarray(original).convert("RGB"), Image.fromarray(jet_heatmap(score)),
               Image.fromarray(mask).convert("RGB")]
     gap, margin, footer = 12, 12, 64

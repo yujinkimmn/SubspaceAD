@@ -2,12 +2,13 @@ import unittest
 import tempfile
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 from PIL import Image
 import numpy as np
 import torch
 from run import (VoidNet, MixStyle, loss_fn, threshold_for, metrics, copy_void, H, W,
                  save_panel, pixel_metrics, calibrate_post_processor, post_process, normalize_scores, jet_heatmap,
-                 load_manifest, panel_metadata_lines, save_eval)
+                 load_manifest, panel_metadata_lines, save_eval, select_experiment, validation_constraints)
 
 class TestCSAM(unittest.TestCase):
     def test_native_shape_and_grad(self):
@@ -131,12 +132,41 @@ class TestCSAM(unittest.TestCase):
         scores,pixels,labels,masks=post_process(test,cal)
         np.testing.assert_allclose(scores,[.7,1.],atol=1e-6)
         np.testing.assert_allclose(pixels[0],[[.54,.5],[.1,0]],atol=1e-6)
-        self.assertTrue(labels[0]); self.assertTrue(masks[0,0,0]); self.assertFalse(masks[0,0,1])
+        self.assertTrue(labels[0]); self.assertTrue(masks[0,0,0]); self.assertTrue(masks[0,0,1])
         self.assertNotEqual(float(scores[0]),float(pixels[0].max()))
         np.testing.assert_array_equal(normalize_scores([0,2,4],2,2,2),[0,.5,1])
-        # Sensitivity 0.5 means strict > 0.5, just as OneClassPostProcessor does.
-        self.assertFalse(post_process(maps,cal)[2].any())
+        # The raw equality included by the F1 curve is also included in inference.
+        np.testing.assert_array_equal(post_process(maps,cal)[2],[True,False])
         self.assertEqual(metrics(rows,test,.5,"test",cal)["tp"],1)
+
+    def test_eval_rank_metrics_ignore_display_clipping(self):
+        y=np.array([[1,0]],np.float32)
+        rows=[dict(label=1,y=y,equipment="E"),dict(label=0,y=y*0,equipment="E")]
+        val=np.array([[[1.,0.]],[[0.5,0.]]],np.float32)
+        calibration=calibrate_post_processor(rows,val,raw_image_scores=[1.,0.])
+        test=np.array([[[3.,2.]],[[2.,2.]]],np.float32)
+        image_scores=[3.,2.]
+        display, pixels, _, _=post_process(test,calibration,raw_image_scores=image_scores)
+        np.testing.assert_array_equal(display, [1.,1.])
+        np.testing.assert_array_equal(pixels,np.ones_like(test))
+        for split in ("val","test"):
+            result=metrics(rows,test,.5,split,calibration,raw_image_scores=image_scores)
+            self.assertEqual(result["image_auroc"],1.)
+            self.assertEqual(result["pixel_auroc"],1.)
+            if split == "test":
+                self.assertEqual(result["pixel_aupro"],1.)
+
+    def test_validation_constraints_control_selection(self):
+        args=SimpleNamespace(padim_suite=True,region_recall=.9)
+        goals=dict(image_recall=.95,region_recall=.9,pixel_fpr_cap=.05)
+        def candidate(name, recall, fpr, pixel_fpr=.04, small=.9):
+            val=dict(recall=recall,fpr=fpr,worst_equipment_fpr=fpr,dice=.9,pixel_fpr=pixel_fpr,
+                     regions={k:dict(recall=small) for k in ("1px","2-4px")})
+            return dict(experiment=name,status="ok",val=val,validation_constraints=validation_constraints(val,goals))
+        ineligible=[candidate("low recall",.70,.01),candidate("too much pixel FP",1.,.02,.08),
+                    candidate("missing GT",1.,.03,small=None)]
+        self.assertIsNone(select_experiment(ineligible,args))
+        self.assertEqual(select_experiment([*ineligible,candidate("eligible",.95,.05)],args),"eligible")
 
     def test_jet_uses_opencv_lut_without_per_image_normalization(self):
         import cv2

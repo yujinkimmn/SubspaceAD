@@ -85,7 +85,7 @@ def main():
                     assert not list((d/split).glob("*.npy"))
                 for i,rec in enumerate(records):
                     assert all(rec[key]==str(by_id[rec["id"]][key]) for key in ("lot","wafer","equipment","label"))
-                    assert int(rec["prediction"])==int(float(rec["score"])>.5)
+                    assert int(rec["prediction"])==int(float(rec["raw_score"])>=cal["image_threshold"])
                     with Image.open(d/split/(rec["id"]+"_panel.png")) as im:
                         panel=np.asarray(im)
                     top=panel.shape[0]-ph-64

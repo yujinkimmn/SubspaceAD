@@ -23,7 +23,10 @@ def main():
     assert conf["padim_map_restore"]=="bilinear_input_then_native"
     assert conf["padim_image_score_source"]=="model_input_map_max"
     results=json.loads((root/"results.json").read_text())
-    assert len(results)==6 and all(r["status"]=="ok" for r in results),results
+    assert {r["experiment"] for r in results}==set(conf["experiments"])
+    assert all(r["status"]=="ok" for r in results),results
+    baseline=root/"p0_pretrained"
+    direct=root/"p0_direct_native"
     ref=torch.load(root/"p0_pretrained"/"model.pt",map_location="cpu",weights_only=True)
     for r in results:
         d=root/r["experiment"]
@@ -31,9 +34,14 @@ def main():
         model=torch.load(d/"model.pt",map_location="cpu",weights_only=True)
         assert model["upsample_factor"]==4 and model["max_layer_depth"]==2 and model["n_features"]==40
         assert model["backbone_name"]=="resnet18.a1_in1k"
-        assert model["map_restore"]=="bilinear_input_then_native"
+        direct_map = d == direct
+        assert model["map_restore"]==("direct_native" if direct_map else "bilinear_input_then_native")
         assert model["image_score_source"]=="model_input_map_max"
         assert model["post_processor"]==r["post_processor"]
+        assert model["post_processor"]["decision_rule"]=="raw_gte"
+        assert model["post_processor"]["method"]=="recall_constrained"
+        if direct_map:
+            assert torch.equal(model["mu"],ref["mu"]) and torch.equal(model["chol"],ref["chol"])
         assert tuple(model["feature_shape"])==native
         assert tuple(model["mu"].shape)==(native[0]*native[1],40)
         assert tuple(model["chol"].shape)==(native[0]*native[1],40,40)
@@ -43,7 +51,14 @@ def main():
             with (d/split/"scores.csv").open(newline="",encoding="utf-8") as f:
                 records=list(csv.DictReader(f))
             raw=[float(r["raw_score"]) for r in records]
-            assert all(v+1e-6*(1+abs(v))>=float(r["native_map_max"]) for v,r in zip(raw,records))
+            if direct_map:
+                with (baseline/split/"scores.csv").open(newline="",encoding="utf-8") as f:
+                    original=list(csv.DictReader(f))
+                assert [(x["id"],x["raw_score"],x["prediction"]) for x in original]==[
+                    (x["id"],x["raw_score"],x["prediction"]) for x in records]
+                assert any(a["native_map_max"]!=b["native_map_max"] for a,b in zip(original,records))
+            else:
+                assert all(v+1e-6*(1+abs(v))>=float(r["native_map_max"]) for v,r in zip(raw,records))
             if split=="val":
                 assert model["post_processor"]["image_min"]==min(raw)
                 assert model["post_processor"]["image_max"]==max(raw)
@@ -53,10 +68,10 @@ def main():
             for f in panels:
                 with Image.open(f) as im:
                     assert im.height>native[0]*scale+96 and im.width>=native[1]*scale*3+48
-        if r["experiment"]!="p0_pretrained":
+        if d not in (baseline, direct):
             summary=json.loads((d/"backbone_summary.json").read_text())
             assert summary["weight_max_abs_change"]>0 and summary["max_layer_depth"]==2
-            assert (summary["mixstyle_calls"]>0)==("mixstyle" in r["experiment"])
+            assert (summary["mixstyle_calls"]>0)==(r["experiment"] in ("p2_classification_mixstyle","p4_consistency_mixstyle","p5_pixel_mixstyle"))
         print(r["experiment"],"native4x depth2 feature40 OK")
 
 if __name__=="__main__":

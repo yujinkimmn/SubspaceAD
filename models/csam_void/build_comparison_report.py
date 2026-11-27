@@ -2,6 +2,8 @@
 import argparse
 import base64
 import json
+import random
+from statistics import quantiles
 from pathlib import Path
 
 from build_report import CSS, PADIM_EXPERIMENTS, esc, load_json, table
@@ -119,6 +121,46 @@ def summarize_pairs(pairs):
                 bg_all=background(pairs), bg_normal=background(pairs, 0), bg_void=background(pairs, 1))
 
 
+def paired_lot_intervals(pairs, *, repeats=1000):
+    """Percentile intervals for candidate minus P0 on matched, resampled root lots."""
+    metrics = ("Image FPR", "1px recall", "2–4px recall")
+    lots = {}
+    for base, candidate in pairs:
+        counts = lots.setdefault(base["lot"], [[0, 0] for _ in metrics])
+        if base["label"] == 0:
+            counts[0][0] += int(candidate["image_prediction"]) - int(base["image_prediction"])
+            counts[0][1] += 1
+        for a, b in zip(base["regions"], candidate["regions"]):
+            if a["area"] <= 4:
+                index = 1 if a["area"] == 1 else 2
+                counts[index][0] += int(b["overlap"] > 0) - int(a["overlap"] > 0)
+                counts[index][1] += 1
+
+    blocks = [lots[k] for k in sorted(lots)]
+    rng = random.Random(42)
+    deltas = [[] for _ in metrics]
+    supporting = [sum(block[i][1] > 0 for block in blocks) for i in range(len(metrics))]
+    if max(supporting, default=0) >= 2:
+        for _ in range(repeats):
+            draw = rng.choices(blocks, k=len(blocks))
+            for i, values in enumerate(deltas):
+                if supporting[i] >= 2:
+                    n = sum(block[i][1] for block in draw)
+                    if n:
+                        values.append(sum(block[i][0] for block in draw) / n)
+
+    rows = []
+    for i, name in enumerate(metrics):
+        n = sum(block[i][1] for block in blocks)
+        estimate = ratio(sum(block[i][0] for block in blocks), n)
+        interval = "N/A"
+        if len(deltas[i]) >= 2:
+            cuts = quantiles(deltas[i], n=40, method="inclusive")
+            interval = f"{cuts[0]*100:+.2f} ~ {cuts[-1]*100:+.2f} pp"
+        rows.append((name, n, supporting[i], pp(0., estimate), interval))
+    return rows
+
+
 def region_table(summary):
     rows = []
     for bucket, c in summary["regions"].items():
@@ -219,7 +261,7 @@ def matched_operating_points(base_result, candidate_result):
     return ("<h4>동일한 validation 목표에서 비교 (추가 진단)</h4>"
             "<p>각 모델의 validation score에서 정한 공통 raw image/pixel threshold를 test에도 고정 적용했다. "
             +source_note+"동일 목표에 도달하더라도 score tie 때문에 실제 validation recall은 다를 수 있다. "
-            "위의 최종 F1-adaptive 판정과 별개이며 test threshold 최적화는 하지 않는다.</p>"
+            "위의 최종 판정과 별개이며 test threshold 최적화는 하지 않는다.</p>"
             +tab(["Validation 목표","Split","P0 FPR","후보 FPR","Δ FPR","P0 image recall","후보 image recall",
                   "P0 1px recall","후보 1px recall","P0 2–4px recall","후보 2–4px recall"],rows))
 

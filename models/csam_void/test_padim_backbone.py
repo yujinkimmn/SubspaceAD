@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 import numpy as np
 import torch
-from padim_backbone import CrossMix, preprocess, layers, consistency, batch_rows, operating_points
-from run import create_padim_backbone, padim_input, PADIM_BACKBONE
+from padim_backbone import CrossMix, preprocess, layers, consistency, batch_rows, operating_points, adaptation_domains
+from run import create_padim_backbone, padim_input, PADIM_BACKBONE, domain_aug, padim_prediction_maps
 
 class TestPadimBackbone(unittest.TestCase):
     def test_cross_mix_and_eval_identity(self):
@@ -19,6 +19,32 @@ class TestPadimBackbone(unittest.TestCase):
         self.assertFalse(torch.equal(x,y))
         mix.eval()
         self.assertTrue(torch.equal(x,mix(x,["A","B"])))
+
+    def test_mix_rng_does_not_change_photometric_rng(self):
+        x=np.linspace(.2,.8,20,dtype=np.float32).reshape(4,5)
+        a,b=random.Random(42),random.Random(42)
+        mix=CrossMix(p=1,seed=42)
+        replica=CrossMix(p=1,seed=42)
+        features=torch.arange(40,dtype=torch.float32).view(2,1,4,5)
+        for _ in range(3):
+            np.testing.assert_array_equal(domain_aug(x,a),domain_aug(x,b))
+            torch.testing.assert_close(mix(features,["A","B"]),replica(features,["A","B"]))
+
+    def test_preflight_counts_only_eligible_training_domains(self):
+        rows=[dict(label=0,equipment="A"),dict(label=1,equipment="B"),dict(label=-1,equipment="C")]
+        self.assertEqual(adaptation_domains("p2_classification_mixstyle",rows),["A","B"])
+        self.assertEqual(adaptation_domains("p4_consistency_mixstyle",rows),["A"])
+        self.assertIsNone(adaptation_domains("p5_pixel_no_mixstyle",rows))
+
+    def test_direct_native_map_preserves_model_input_score(self):
+        peak=torch.zeros(1,1,5,5)
+        peak[0,0,2,2]=1
+        crop=(0,0,20,20)
+        restored, restored_score=padim_prediction_maps(peak,crop,(5,5),None,4)
+        direct, direct_score=padim_prediction_maps(peak,crop,(5,5),None,4,direct_native=True)
+        torch.testing.assert_close(restored_score,direct_score)
+        torch.testing.assert_close(direct,peak)
+        self.assertLess(restored.max().item(),direct.max().item())
 
     def test_letterbox_both_orientations(self):
         for shape in ((81,61),(61,81)):

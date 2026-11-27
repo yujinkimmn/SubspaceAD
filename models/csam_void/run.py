@@ -17,7 +17,8 @@ from csam_progress import LOG, setup_logging, console_info, epoch_note, stage_pr
 from scipy import ndimage
 from sklearn.metrics import roc_auc_score, roc_curve
 from score_processing import (NORMALIZED_THRESHOLD, PADIM_IMAGE_SCORE_SOURCE, get_raw_image_scores,
-                              f1_adaptive_threshold, calibrate_post_processor, normalize_scores, post_process)
+                              f1_adaptive_threshold, calibrate_post_processor, normalize_scores, post_process,
+                              validation_constraints)
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -142,12 +143,12 @@ def split_rows(rows, heldout=None):
             raise ValueError(f"{s} requires confirmed normal and masked void samples (holdout={heldout})")
     return out
 
-def domain_aug(x):
+def domain_aug(x, rng=random):
     # Photometric changes only; no resize, blur, or geometry that deletes 1px defects.
-    gain = random.uniform(.85, 1.15)
-    offset = random.uniform(-.06, .06)
+    gain = rng.uniform(.85, 1.15)
+    offset = rng.uniform(-.06, .06)
     # Mild unsharp masking, without spatially shifting the mask.
-    sharp = random.uniform(0, .25)
+    sharp = rng.uniform(0, .25)
     smooth = ndimage.gaussian_filter(x, .65)
     return np.clip(gain * (x + sharp * (x - smooth)) + offset, 0, 1).astype(np.float32)
 
@@ -316,10 +317,10 @@ def pixel_metrics(rows, maps, include_aupro=False):
     return result
 
 
-def summarize(rows, maps, threshold, evaluation_split=None, *, image_scores=None, pred_labels=None, pred_masks=None, metric_maps=None):
+def summarize(rows, maps, threshold, evaluation_split=None, *, image_scores=None, pred_labels=None, pred_masks=None):
     tp = fp = tn = fn = inter = union = predpix = truepix = 0
     region = {k:[0,0] for k in ("1px", "2-4px", "5+px")}
-    false_regions = 0
+    false_regions = pixels = 0
     labels, scores = [], []
     for i,(r,m) in enumerate(zip(rows,maps)):
         pred = m >= threshold if pred_masks is None else pred_masks[i]
@@ -331,6 +332,7 @@ def summarize(rows, maps, threshold, evaluation_split=None, *, image_scores=None
         y = r["y"] > 0
         inter += int((pred & y).sum()); union += int((pred | y).sum())
         predpix += int(pred.sum()); truepix += int(y.sum())
+        pixels += y.size
         if not actual:
             false_regions += ndimage.label(pred, structure=np.ones((3,3)))[1]
         lab,n = ndimage.label(y, structure=np.ones((3,3)))
@@ -341,15 +343,17 @@ def summarize(rows, maps, threshold, evaluation_split=None, *, image_scores=None
             region[bucket][1] += 1
             region[bucket][0] += int((obj & pred).any())
     div = lambda a,b: float(a/b) if b else None
+    bg_fp, bg_pixels = predpix - inter, pixels - truepix
     result = dict(tp=tp, fp=fp, tn=tn, fn=fn, recall=div(tp,tp+fn), fpr=div(fp,fp+tn),
                 underkill=div(fn,tp+fn), dice=div(2*inter,predpix+truepix), iou=div(inter,union),
                 auroc=float(roc_auc_score(labels,scores)) if len(set(labels))==2 else None,
                 fp_regions_per_normal=div(false_regions,fp+tn),
+                 pixel_fpr=div(bg_fp,bg_pixels), bg_fp=bg_fp, bg_pixels=bg_pixels,
                 regions={k:dict(hit=v[0], count=v[1], recall=div(*v)) for k,v in region.items()})
 
     if evaluation_split is not None:
         result["image_auroc"] = result["auroc"]
-        result.update(pixel_metrics(rows, maps if metric_maps is None else metric_maps, include_aupro=evaluation_split=="test"))
+        result.update(pixel_metrics(rows, maps, include_aupro=evaluation_split=="test"))
         if evaluation_split=="test":
             result["image_f1"] = div(2*tp, 2*tp+fp+fn) or 0.0
     return result
@@ -358,11 +362,8 @@ def metrics(rows, maps, threshold, evaluation_split=None, calibration=None, *, r
     inputs = {}
     if calibration is not None:
         raw_scores = get_raw_image_scores(maps, raw_image_scores, calibration=calibration)
-        scores, normalized, pred_labels, pred_masks = post_process(maps, calibration, raw_image_scores=raw_scores)
-        # anomalib evaluates validation AUROC before post-processing; test uses the normalized output.
-        inputs = dict(image_scores=raw_scores if evaluation_split=="val" else scores,
-                      pred_labels=pred_labels, pred_masks=pred_masks,
-                      metric_maps=maps if evaluation_split=="val" else normalized)
+        _, _, pred_labels, pred_masks = post_process(maps, calibration, raw_image_scores=raw_scores)
+        inputs = dict(image_scores=raw_scores, pred_labels=pred_labels, pred_masks=pred_masks)
     elif raw_image_scores is not None:
         scores=get_raw_image_scores(maps,raw_image_scores)
         inputs=dict(image_scores=scores,pred_labels=scores>=threshold)
@@ -565,10 +566,14 @@ def restore_padim_map(score,crop,native,size=224,upsample_factor=None):
     return restore_native_map(padim_input_anomaly_map(score,crop,size,upsample_factor),
                               crop,native,upsample_factor)
 
-def padim_prediction_maps(distance,crop,native,size=224,upsample_factor=None,smooth=0.):
+def padim_prediction_maps(distance,crop,native,size=224,upsample_factor=None,smooth=0., *, direct_native=False):
     """Keep pred_score from the model output, independently of native-map restoration."""
     anomaly_map=padim_input_anomaly_map(distance,crop,size,upsample_factor,smooth)
     pred_score=anomaly_map.amax(dim=(-2,-1)).squeeze(1)
+    if direct_native:
+        if upsample_factor != 4 or tuple(distance.shape[-2:]) != tuple(native) or smooth != 0:
+            raise ValueError("Direct native map requires native 4x geometry and zero smoothing")
+        return distance,pred_score
     return restore_native_map(anomaly_map,crop,native,upsample_factor),pred_score
 
 def restore_head_logits(logits,crop,native,size=224,upsample_factor=None):
@@ -581,8 +586,9 @@ def restore_head_logits(logits,crop,native,size=224,upsample_factor=None):
 
 class Padim:
     """Independent ResNet18 PaDiM-style baseline, not the user's deployed checkpoint."""
-    def __init__(self,args,device):
+    def __init__(self,args,device, *, direct_native=False):
         self.device,self.args = device,args
+        self.direct_native = direct_native
         self.net = create_padim_backbone(args.padim_weights)
         self.net.eval().to(device)
         self.depth=getattr(args,"max_layer_depth",3)
@@ -640,7 +646,7 @@ class Padim:
                 score=z.square().sum((-1,-2)).sqrt().reshape(len(x),1,*self.shape)
                 native_map,pred_score=padim_prediction_maps(
                     score,(top,left,h,w),x[0].shape[-2:],self.args.padim_size,
-                    self.upsample_factor,self.args.padim_smooth)
+                    self.upsample_factor,self.args.padim_smooth,direct_native=self.direct_native)
                 out.extend(native_map[:,0].cpu().numpy())
                 scores.extend(pred_score.cpu().numpy())
                 bar.update(len(x))
@@ -658,7 +664,7 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_sca
     dest=out/split
     dest.mkdir(exist_ok=True)
     raw_scores=get_raw_image_scores(maps,raw_image_scores,calibration=calibration)
-    scores, normalized, pred_labels, _=post_process(maps,calibration,raw_image_scores=raw_scores)
+    scores, normalized, pred_labels, pred_masks=post_process(maps,calibration,raw_image_scores=raw_scores)
     # Save a single visual artifact per image. Numeric maps are opt-in for diagnostics.
     evidence = []
     if collect_comparison:
@@ -668,23 +674,29 @@ def save_eval(rows,maps,calibration,out,split, *, save_raw_maps=False, panel_sca
     with stage_progress(desc,len(rows),unit="img") as bar, (dest/"scores.csv").open("w",newline="",encoding="utf-8") as f:
         writer=csv.writer(f)
         writer.writerow(["id","image","equipment","lot","label","score","prediction","raw_score","wafer","native_map_max"])
-        for r,m,norm,score,flag,raw_score in zip(rows,maps,normalized,scores,pred_labels,raw_scores):
+        for r,m,norm,score,flag,mask,raw_score in zip(rows,maps,normalized,scores,pred_labels,pred_masks,raw_scores):
             writer.writerow([r["id"],r["image"],r["equipment"],r["lot"],r["label"],float(score),int(flag),float(raw_score),r.get("wafer", ""),float(m.max())])
             if save_raw_maps:
                 np.save(dest/(r["id"]+".npy"),m)
                 np.save(dest/(r["id"]+"_normalized.npy"),norm)
             save_panel(r["x"],norm,NORMALIZED_THRESHOLD,dest/(r["id"]+"_panel.png"),
-                       metadata=panel_metadata_lines(r, flag, score), scale=panel_scale)
+                       metadata=panel_metadata_lines(r, flag, score), scale=panel_scale, prediction_mask=mask)
             if collect_comparison:
-                evidence.append(sample_evidence(r, norm, flag, NORMALIZED_THRESHOLD))
+                evidence.append(sample_evidence(r, norm, flag, prediction_mask=mask))
             bar.update(1)
     if collect_comparison:
         write_evidence(out/"comparison_stats.json", evidence)
 
+def select_experiment(results, args):
+    candidates = [r for r in results if r["status"] == "ok"]
+    if getattr(args, "padim_suite", False):
+        candidates = [r for r in candidates if all(v is True for v in r["validation_constraints"].values())]
+    return min(candidates, key=lambda r: rank_key(r["val"],args))["experiment"] if candidates else None
+
+
 def report(results,out,args):
     (out/"results.json").write_text(json.dumps(results,indent=2,allow_nan=False),encoding="utf-8")
-    ok=[r for r in results if r["status"]=="ok"]
-    best=min(ok,key=lambda r:rank_key(r["val"],args))["experiment"] if ok else None
+    best=select_experiment(results,args)
     fields=["experiment","status","threshold","seconds","val_image_auroc","val_pixel_auroc","test_image_f1","test_pixel_aupro","test_pixel_auroc","val_fpr","val_recall","val_dice","test_fpr",
             "test_recall","test_dice","test_iou","test_worst_fpr","test_1px","test_2-4px","test_5+px","error"]
     flat=[]
@@ -704,8 +716,10 @@ def report(results,out,args):
         writer.writeheader(); writer.writerows(flat)
     esc=lambda v:html.escape("" if v is None else f"{v:.4f}" if isinstance(v,float) else str(v))
     cols=fields[:-1]
+    rules = ("Selection requires all validation recall targets and the background pixel FPR cap."
+             if getattr(args, "padim_suite", False) else "Final thresholds maximize validation F1.")
     body=["<meta charset='utf-8'><title>CSAM experiments</title><style>body{font:15px system-ui;margin:30px}table{border-collapse:collapse}td,th{padding:7px;border:1px solid #ccc}th{background:#eee}pre{white-space:pre-wrap}</style>",
-          "<h1>CSAM Void Segmentation</h1>",f"<p>Validation-selected candidate: {esc(best)}. Test is report-only. Image recall goal: {args.recall}; small-region recall goal: {args.region_recall}. Final decisions use separate F1-adaptive normalization and threshold &gt; 0.5; recall goals are not guaranteed. Lower FPR is better.</p>",
+          "<h1>CSAM Void Segmentation</h1>",f"<p>Validation-selected candidate: {esc(best)}. Test is report-only. Image recall goal: {args.recall}; small-region recall goal: {args.region_recall}. {rules} Image and pixel decisions use their own inclusive raw threshold.</p>",
           "<table><tr>"+"".join(f"<th>{esc(k)}</th>" for k in cols)+"</tr>"]
     for row in flat:
         body.append("<tr>"+"".join(f"<td>{esc(row.get(k))}</td>" for k in cols)+"</tr>")
@@ -724,6 +738,11 @@ def report(results,out,args):
     (out/"selected.json").write_text(json.dumps({"selected_by_validation":best},indent=2),encoding="utf-8")
 
 def run_protocol(parts,args,device,out):
+    suite = getattr(args, "padim_suite", False)
+    goals = None
+    if suite:
+        from padim_backbone import DIRECT_P0, adapt_backbone, adaptation_domains, operating_points
+        goals = dict(image_recall=args.recall, region_recall=args.region_recall, pixel_fpr_cap=args.pixel_fpr_cap)
     out.mkdir(parents=True,exist_ok=False)
     (out/"config.json").write_text(json.dumps(vars(args),indent=2),encoding="utf-8")
     (out/"split_audit.json").write_text(json.dumps({s:[{k:r[k] for k in ("id","image","label","equipment","lot","wafer")} for r in rr] for s,rr in parts.items()},indent=2),encoding="utf-8")
@@ -741,15 +760,21 @@ def run_protocol(parts,args,device,out):
         label=exp.split("_",1)[0].upper()
         if device.type=="cuda": torch.cuda.reset_peak_memory_stats(device)
         try:
-            if exp==EXPS[0] or getattr(args,"padim_suite",False):
+            if exp==EXPS[0] or suite:
                 LOG.info("[PaDiM] square_size=%s upsample_factor=%s depth=%d channels=%d normal-only fit",args.padim_size,args.upsample_factor,args.max_layer_depth,args.padim_dim)
-                model=Padim(args,device)
-                if getattr(args,"padim_suite",False):
-                    from padim_backbone import adapt_backbone
+                direct_native = suite and exp == DIRECT_P0
+                if suite:
+                    domains = adaptation_domains(exp, parts["train"])
+                    if domains is not None:
+                        LOG.info("[MixStyle preflight] eligible training equipment: %s", ", ".join(domains) or "none")
+                        if len(domains) < 2:
+                            raise SkipExperiment(f"Cross-equipment MixStyle needs 2 eligible training domains; found {len(domains)}")
+                model=Padim(args,device,direct_native=direct_native)
+                if suite:
                     adapt_backbone(model.net,exp,parts,args,device,dest)
                 model.fit([r for r in parts["train"] if r["label"]==0],desc=f"{label} Gaussian fit")
                 checkpoint=dict(mu=model.mu.cpu(),chol=model.chol.cpu(),channels=model.channels.cpu(),
-                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,map_restore=PADIM_MAP_RESTORE,image_score_source=PADIM_IMAGE_SCORE_SOURCE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
+                                size=args.padim_size,upsample_factor=args.upsample_factor,max_layer_depth=args.max_layer_depth,n_features=args.padim_dim,feature_shape=tuple(model.shape),smooth=args.padim_smooth,native_shape=args.native_shape,backbone_name=PADIM_BACKBONE,map_restore="direct_native" if direct_native else PADIM_MAP_RESTORE,image_score_source=PADIM_IMAGE_SCORE_SOURCE,backbone={k:v.cpu() for k,v in model.net.state_dict().items()})
                 predict=model.predict
             else:
                 cnn_predict=train_cnn(exp,parts,args,device,dest)
@@ -759,7 +784,7 @@ def run_protocol(parts,args,device,out):
             vm,vs=predict(parts["val"],desc=f"{label} validation")
             if not np.isfinite(vm).all():
                 raise ValueError("Nonfinite validation predictions")
-            calibration=calibrate_post_processor(parts["val"],vm,raw_image_scores=vs)
+            calibration=calibrate_post_processor(parts["val"],vm,raw_image_scores=vs,goals=goals)
             th=NORMALIZED_THRESHOLD
             checkpoint["post_processor"]=calibration
             torch.save(checkpoint,dest/"model.pt")
@@ -768,7 +793,7 @@ def run_protocol(parts,args,device,out):
                      calibration["image_score_source"],
                      calibration["image_threshold"],calibration["image_min"],calibration["image_max"],
                      calibration["pixel_threshold"],calibration["pixel_min"],calibration["pixel_max"])
-            LOG.info("[Test] images=%d normalized threshold=%.6g (fixed from validation)",len(parts["test"]),th)
+            LOG.info("[Test] images=%d using fixed image/pixel raw thresholds from validation",len(parts["test"]))
             tm,ts=predict(parts["test"],desc=f"{label} test")
             if not np.isfinite(vm).all() or not np.isfinite(tm).all():
                 raise ValueError("Nonfinite predictions")
@@ -781,11 +806,12 @@ def run_protocol(parts,args,device,out):
             save_eval(parts["val"],vm,calibration,dest,"val",save_raw_maps=args.save_raw_maps,
                       panel_scale=args.panel_scale,desc=f"{label} save val",raw_image_scores=vs)
             save_eval(parts["test"],tm,calibration,dest,"test",save_raw_maps=args.save_raw_maps,
-                      panel_scale=args.panel_scale, collect_comparison=getattr(args,"padim_suite",False),
+                      panel_scale=args.panel_scale, collect_comparison=suite,
                       desc=f"{label} save test",raw_image_scores=ts)
             result=dict(experiment=exp,status="ok",threshold=th,post_processor=calibration,val=val,test=test)
-            if getattr(args,"padim_suite",False):
-                from padim_backbone import operating_points
+            if suite:
+                result["validation_constraints"] = validation_constraints(val, goals)
+                result["map_restore"] = checkpoint["map_restore"]
                 # Retain the original shared-raw-threshold sweep as a diagnostic, independent of the calibrated decisions.
                 points=operating_points(parts["val"],vm,parts["test"],tm,None,
                                         val_image_scores=vs,test_image_scores=ts)
@@ -825,15 +851,15 @@ def run_protocol(parts,args,device,out):
                  exp_num,len(args.experiments),exp,result["status"],elapsed(result["seconds"]),
                  elapsed(dt/exp_num*(len(args.experiments)-exp_num)))
         if device.type=="cuda": torch.cuda.empty_cache()
-    valid=[r for r in results if r["status"]=="ok"]
-    selected=min(valid,key=lambda r:rank_key(r["val"],args))["experiment"] if valid else "none"
-    console_info("[Selected by validation] %s / %s",out.name,selected)
+    selected = select_experiment(results,args)
+    console_info("[Selected by validation] %s / %s",out.name,selected or ("no eligible model" if suite else "none"))
     return results
 
 def main(padim_suite=False):
     if padim_suite:
-        from padim_backbone import PEXPS
-    choices=PEXPS if padim_suite else EXPS
+        from padim_backbone import PEXPS, DIRECT_P0, PIXEL_NO_MIX
+    defaults=PEXPS if padim_suite else EXPS
+    choices=[*defaults, PIXEL_NO_MIX, DIRECT_P0] if padim_suite else defaults
     p=argparse.ArgumentParser(description="PaDiM backbone adaptation P0-P5" if padim_suite else __doc__)
     p.add_argument("--manifest",required=True)
     p.add_argument("--out",required=True)
@@ -860,8 +886,9 @@ def main(padim_suite=False):
     p.add_argument("--padim-weights",help="Official local timm resnet18.a1_in1k checkpoint (.safetensors or .pth/.bin); otherwise download it via timm")
     p.add_argument("--save-raw-maps",action="store_true",help="Optionally save raw and normalized .npy maps for numerical diagnostics; default saves only 3-panel PNGs and scores.csv per split")
     p.add_argument("--panel-scale",type=int,default=4,help="Integer display enlargement (1-16), nearest-neighbor; metrics remain at native resolution")
-    p.add_argument("--experiments",nargs="+",choices=choices,default=choices)
+    p.add_argument("--experiments",nargs="+",choices=choices,default=defaults)
     if padim_suite:
+        p.add_argument("--pixel-fpr-cap",type=float,default=.05,help="Maximum validation background pixel FPR for selection (default: 0.05)")
         p.add_argument("--backbone-lr",type=float,default=1e-5)
         p.add_argument("--head-lr",type=float,default=1e-3)
         p.add_argument("--mix-prob",type=float,default=.5)
@@ -881,8 +908,12 @@ def main(padim_suite=False):
         p.error("Invalid hyperparameters")
     if not (0 <= args.pseudo_negative < args.pseudo_positive <= 1):
         p.error("Require 0 <= pseudo-negative < pseudo-positive <= 1")
+    if padim_suite and not 0 <= args.pixel_fpr_cap <= 1:
+        p.error("--pixel-fpr-cap must be between 0 and 1")
+    if padim_suite and DIRECT_P0 in args.experiments and (args.upsample_factor != 4 or args.padim_smooth != 0):
+        p.error(f"{DIRECT_P0} requires --upsample-factor 4 and --padim-smooth 0")
     if padim_suite and not args.padim_weights:
-        p.error("P0-P5 require --padim-weights with the local timm resnet18.a1_in1k checkpoint (same starting weights for all runs)")
+        p.error("PaDiM experiments require --padim-weights with the local timm resnet18.a1_in1k checkpoint (same starting weights for all runs)")
     if args.log_every < 0:
         p.error("--log-every must be >= 0")
     if not 1 <= args.panel_scale <= 16:

@@ -9,7 +9,7 @@ from PIL import Image
 
 from comparison_metrics import sample_evidence, write_evidence
 from build_comparison_report import (BASE, align_samples, background, build_comparison_report,
-                                     load_samples, summarize_pairs)
+                                     load_samples, summarize_pairs, paired_lot_intervals)
 from visualization import save_panel
 
 
@@ -47,6 +47,16 @@ class TestPairedComparison(unittest.TestCase):
         self.assertEqual(sum(pa["hist"]),57)
         self.assertEqual(background(pairs,1)[0]["fp"],2)
         self.assertEqual(background(pairs,0)[0]["fp"],3)
+
+    def test_bootstrap_resamples_paired_lots_and_displays_missing_support(self):
+        a,b=self.evidence()
+        pairs=list(zip(a,b))
+        one_lot=paired_lot_intervals(pairs)
+        self.assertEqual(one_lot[0],("Image FPR",1,1,"-100.00 pp","N/A"))
+        two_lots=paired_lot_intervals([*pairs,*[(dict(x,lot="LOT2"),dict(y,lot="LOT2")) for x,y in pairs]])
+        self.assertEqual(two_lots[0],("Image FPR",2,2,"-100.00 pp","-100.00 ~ -100.00 pp"))
+        self.assertEqual(two_lots[1][3:],("-100.00 pp","-100.00 ~ -100.00 pp"))
+        self.assertEqual(two_lots[2][3:],("+100.00 pp","+100.00 ~ +100.00 pp"))
 
     def test_alignment_rejects_different_gt_or_ids(self):
         a,b=self.evidence()
